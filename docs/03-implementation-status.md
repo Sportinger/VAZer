@@ -10,6 +10,12 @@ Warum Python fuer diesen Start:
 - `numpy` reicht fuer die erste DSP-Schicht
 - `ffmpeg` und `ffprobe` bleiben die externen Medien-Backends
 
+Aktueller Produktscope:
+
+- kein generischer Videoeditor
+- vorerst nur Theater-VAZ
+- durchgehender Multicam-Mitschnitt mit Master-Audio
+
 ## Aktuelle Dateien
 
 - `pyproject.toml`: Python-Projektdefinition
@@ -19,6 +25,7 @@ Warum Python fuer diesen Start:
 - `src/vazer/analysis.py`: speech-like Master-Aktivitaet und technische Kameraanalyse
 - `src/vazer/cut_plan.py`: baseline- und signal-aware Planer
 - `src/vazer/cut_review.py`: lokale Cut-Validierung und deterministische Reparatur
+- `src/vazer/draft_prompt.py`: feste Theater-VAZ-System-Prompt fuer den spaeteren AI-Draft-Planer
 - `src/vazer/render.py`: ffmpeg-Scaffold aus `cut_plan`
 - `src/vazer/transcribe.py`: OpenAI-Transcription nur fuer das Master-Audio
 - `src/vazer/transcript.py`: Loader fuer externe Transcript-Artefakte
@@ -39,6 +46,7 @@ Warum Python fuer diesen Start:
 - lokale `cut_validation.json` nur an den Cut-Stellen berechnen
 - einen bestehenden Plan deterministisch in ein `cut_plan.repaired.json` ueberfuehren
 - einen ffmpeg-Render-Scaffold aus `cut_plan` erzeugen
+- einen festen Theater-VAZ-Prompt und Domain-Profile im Repo halten
 
 ## Smoke-Test mit den Beispiel-Dateien
 

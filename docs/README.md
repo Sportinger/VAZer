@@ -14,6 +14,8 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [07-analysis-map-schema.md](./07-analysis-map-schema.md): billiges no-proxy CV aus Master-Audio und Kamera-Video fuer Draft-Planung
 - [08-transcript-artifact.md](./08-transcript-artifact.md): OpenAI-Transcription nur fuer das Master-Audio mit Wort-Zeitstempeln
 - [09-cut-review-workflow.md](./09-cut-review-workflow.md): `draft -> validate -> repair` fuer lokale technische Pruefung von Cut-Stellen
+- [10-theater-vaz-profile.md](./10-theater-vaz-profile.md): fester Produktscope fuer Theater-VAZ statt generischem Multicam
+- [11-llm-draft-prompt.md](./11-llm-draft-prompt.md): erste feste System-Prompt-Vorlage fuer den spaeteren AI-Draft-Planer
 
 ## Naechste Docs
 
