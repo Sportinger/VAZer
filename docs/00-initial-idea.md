@@ -6,7 +6,7 @@ VAZer soll eine sehr kleine, effiziente Terminal-App sein, die Video- und Audio-
 
 ## Zielbild
 
-Der Nutzer soll aus mehreren Kamera- und Audioquellen moeglichst wenig manuell schneiden muessen.
+Der Nutzer soll aus mehreren Kamera- und Audioquellen nichts schneiden muessen.
 
 Der grobe Ablauf:
 
@@ -50,14 +50,30 @@ Beim Ingest sollten pro Asset sofort Metadaten erzeugt werden:
 
 Eine Datei wird explizit als Master definiert. Alle anderen Quellen werden relativ dazu ausgerichtet.
 
+Fuer die reale Zielumgebung wird jetzt zunaechst fest angenommen:
+
+- kein verwertbarer Timecode
+- Sync rein ueber Audio
+- Master-Audio ist die einzige kanonische Zeitachse
+- Kamera-Audio ist Scratch-Audio fuer Sync, nicht finales Audio
+
 Pragmatischer Ansatz fuer MVP:
 
 - Audio aus allen Quellen extrahieren
 - auf ein gemeinsames PCM-Format normieren
 - Offset per Cross-Correlation oder Audio-Fingerprint bestimmen
-- pro Clip einen sicheren Startoffset und optional ein Konfidenz-Mass speichern
+- nicht nur Offset, sondern ein Zeitmodell `source_time = speed * master_time + offset` speichern
+- pro Clip einen sicheren Startoffset und ein Konfidenz-Mass speichern
 
 Output dieses Schritts ist eine gemeinsame Timeline.
+
+Aktueller Prototyp-Stand:
+
+- aktive Kamera-Audiospur automatisch erkennen
+- stille oder duplizierte Scratch-Spuren verwerfen
+- Coarse Sync ueber duration-bounded Audiosuche
+- Fine Sync ueber mehrere Anchor-Fenster
+- kleine Drift als lineares Modell fitten
 
 ### 3. Transkription
 
@@ -143,6 +159,16 @@ Das ist wichtig fuer:
 - `edit_decision`
 - `cut_plan`
 
+Fuer `sync_map` ist inzwischen klar, dass es mindestens diese Dinge tragen muss:
+
+- `asset_id`
+- `audio_stream`
+- `camera_starts_at_master_seconds`
+- `speed`
+- `offset_seconds`
+- `confidence`
+- `anchor_measurements`
+
 ## Backend-Einschaetzung
 
 ### `MediaBunny`
@@ -211,7 +237,18 @@ Alles andere spaeter:
 
 ## Naechster sinnvoller Schritt
 
-Als naechstes sollten wir den Schnittplan als konkretes JSON-Schema definieren. Daran haengen fast alle weiteren Entscheidungen:
+Der naechste Schritt teilt sich jetzt sinnvoll in zwei Ebenen:
+
+1. `sync_map` als persistierbares JSON-Format festziehen
+2. danach den Schnittplan als konkretes JSON-Schema definieren
+
+Warum diese Reihenfolge:
+
+- der `cut_plan` braucht eine belastbare Timeline
+- Drift und Konfidenz sollen vor dem Rendern explizit vorliegen
+- mehrere Kameras lassen sich so spaeter einheitlich auf dieselbe Master-Zeit abbilden
+
+Danach haengen fast alle weiteren Entscheidungen an diesem Schema:
 
 - welche Analysedaten wirklich noetig sind
 - wie das LLM gepromptet wird

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vazer"
+version = "0.1.0"
+description = "Terminal-first video assembly orchestrator with audio-first sync."
+readme = "docs/README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "numpy>=2.0"
+]
+
+[project.scripts]
+vazer = "vazer.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -6,9 +6,11 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 
 - [00-initial-idea.md](./00-initial-idea.md): erste Produktskizze fuer eine terminal-first Editing-App
 - [01-workflow-rules.md](./01-workflow-rules.md): Repo-Arbeitsweise fuer Docs, Commits und Pushes
+- [02-sync-architecture.md](./02-sync-architecture.md): Sync-Modell, Datenmodell und aktuelle algorithmische Entscheidungen
+- [03-implementation-status.md](./03-implementation-status.md): aktueller Code-Stand, CLI und naechste Bauschritte
 
 ## Naechste Docs
 
-- CLI-Kommandos und UX-Fluss
-- Datenmodell fuer Sync, Transcript, Analyse und Cut-Plan
-- MVP-Milestones
+- Persistierbares `sync_map`-Schema
+- Datenmodell fuer Transcript, Analyse und Cut-Plan
+- Render-Backend und `ffmpeg`-Graph-Erzeugung
