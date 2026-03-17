@@ -9,6 +9,7 @@ Es speichert:
 - die verwendete Masterspur
 - die Sync-Optionen des Laufs
 - pro Kamera die gefundene Abbildung auf die Master-Timeline
+- pro Kamera eine kleine Media-Zusammenfassung
 - Anchor-Messungen und Konfidenz
 - auch Fehlerfaelle, damit Batch-Laeufe nicht alles abbrechen
 
@@ -69,6 +70,20 @@ Jeder Kamera-Eintrag hat einen Status:
   "asset_id": "Clip0004",
   "path": "D:\\VAZ_Chaos\\Medien\\Clip0004.MXF",
   "status": "synced",
+  "media": {
+    "format_name": "mxf",
+    "duration_seconds": 4510.56,
+    "audio_stream_count": 4,
+    "video_stream_count": 1,
+    "primary_video": {
+      "absolute_stream_index": 0,
+      "codec_name": "h264",
+      "duration_seconds": 4510.56,
+      "width": 3840,
+      "height": 2160,
+      "frame_rate": 25.0
+    }
+  },
   "selected_stream": {
     "map_specifier": "0:1",
     "absolute_stream_index": 1
@@ -80,7 +95,13 @@ Jeder Kamera-Eintrag hat einen Status:
     "predicted_drift_over_hour_seconds": -0.468514,
     "model": "source_time = speed * master_time + offset_seconds"
   },
-  "coarse": {},
+  "coarse": {
+    "map_specifier": "0:1",
+    "method": "bounded_direct",
+    "camera_starts_at_master_seconds": 71.325846,
+    "master_to_source_offset_seconds": -71.325846,
+    "peak_ratio": 1.294713
+  },
   "anchors": {},
   "summary": {}
 }

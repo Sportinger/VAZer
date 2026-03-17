@@ -25,6 +25,9 @@ class VideoStreamInfo:
     absolute_stream_index: int
     codec_name: str | None
     duration_seconds: float | None
+    width: int | None
+    height: int | None
+    frame_rate: float | None
     tags: dict[str, str]
 
 
@@ -54,6 +57,29 @@ def _optional_int(value: Any) -> int | None:
 def _optional_float(value: Any) -> float | None:
     if value in (None, "", "N/A"):
         return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_rate(value: Any) -> float | None:
+    if value in (None, "", "N/A"):
+        return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    if isinstance(value, str) and "/" in value:
+        numerator, denominator = value.split("/", maxsplit=1)
+        try:
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return None
+            return float(numerator) / denominator_value
+        except (TypeError, ValueError):
+            return None
+
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -110,6 +136,9 @@ def probe_media(path: str) -> MediaInfo:
                     absolute_stream_index=index,
                     codec_name=stream.get("codec_name"),
                     duration_seconds=_optional_float(stream.get("duration")) or format_duration,
+                    width=_optional_int(stream.get("width")),
+                    height=_optional_int(stream.get("height")),
+                    frame_rate=_optional_rate(stream.get("avg_frame_rate")) or _optional_rate(stream.get("r_frame_rate")),
                     tags=dict(stream.get("tags", {})),
                 )
             )

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .fftools import probe_media
 from .sync import SyncOptions, analyze_sync
 
 
@@ -63,12 +64,30 @@ def build_sync_map(
         if master_summary is None:
             master_summary = report["master"]
 
+        media_info = probe_media(camera_path)
+        primary_video = media_info.video_streams[0] if media_info.video_streams else None
         selected_stream = report["camera"]["selected_stream"]
         entries.append(
             {
                 "asset_id": asset_id,
                 "path": camera_path,
                 "status": "synced",
+                "media": {
+                    "format_name": media_info.format_name,
+                    "duration_seconds": media_info.duration_seconds,
+                    "audio_stream_count": len(media_info.audio_streams),
+                    "video_stream_count": len(media_info.video_streams),
+                    "primary_video": None
+                    if primary_video is None
+                    else {
+                        "absolute_stream_index": primary_video.absolute_stream_index,
+                        "codec_name": primary_video.codec_name,
+                        "duration_seconds": primary_video.duration_seconds,
+                        "width": primary_video.width,
+                        "height": primary_video.height,
+                        "frame_rate": primary_video.frame_rate,
+                    },
+                },
                 "selected_stream": {
                     "map_specifier": selected_stream["map_specifier"],
                     "absolute_stream_index": selected_stream["absolute_stream_index"],

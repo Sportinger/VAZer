@@ -57,7 +57,11 @@ Aktuelle Regeln:
 
 ### 3. Coarse Sync
 
-Der aktuelle Prototyp nutzt eine duration-bounded Suche:
+Der aktuelle Prototyp nutzt zwei Grobsuch-Stufen:
+
+#### bounded_direct
+
+Zuerst eine duration-bounded Suche:
 
 - gefilterte Mono-Decodes mit `ffmpeg`
 - Suchraum aus `Masterdauer - Kameradauer + End-Ueberhang`
@@ -68,6 +72,16 @@ Warum diese Einschraenkung bewusst ist:
 - globale Korrelation ueber die komplette Datei springt bei langen Programmen leicht auf falsche Peaks
 - mit der Dauerinformation laesst sich der plausible Suchraum drastisch reduzieren
 - das passt zum aktuellen Zielbild mit einem langen Master-Audio und kuerzeren Kamera-Quellen
+
+#### broad_cluster
+
+Falls `bounded_direct` scheitert:
+
+- mehrere Probe-Fenster derselben Kamera werden gegen die ganze Masterspur gesucht
+- die resultierenden Startkandidaten werden geclustert
+- der stabilste Cluster gewinnt
+
+Das ist wichtig fuer Kameras, die deutlich vor oder nach der Masterspur anlaufen und mit der bounded-Suche durch das Raster fallen.
 
 ### 4. Fine Sync und Drift
 
@@ -100,6 +114,7 @@ Aus den akzeptierten Anchors wird eine Gerade gefittet.
 
 ```json
 {
+  "method": "bounded_direct",
   "camera_starts_at_master_seconds": 71.14,
   "master_to_source_offset_seconds": -71.14,
   "peak_ratio": 1.38
@@ -156,7 +171,6 @@ Optional:
 
 ## Bekannte Grenzen
 
-- Der Coarse Sync geht derzeit von einer weitgehend vom Master umschlossenen Kamera-Datei aus.
 - Noch kein piecewise Sync bei harten Recorder-Spruengen.
 - `sync_map` ist jetzt persistierbar, aber noch ohne manuelle Overrides oder Review-Flags.
 - Noch kein automatischer Render-Schritt.

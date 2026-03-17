@@ -248,6 +248,12 @@ Warum diese Reihenfolge:
 - Drift und Konfidenz sollen vor dem Rendern explizit vorliegen
 - mehrere Kameras lassen sich so spaeter einheitlich auf dieselbe Master-Zeit abbilden
 
+Aktueller Stand:
+
+- `sync_map` existiert als persistierbares Artefakt
+- `cut_plan` existiert als erstes baseline Schnitt-Artefakt
+- ein ffmpeg-Render-Scaffold kann bereits aus dem `cut_plan` erzeugt werden
+
 Danach haengen fast alle weiteren Entscheidungen an diesem Schema:
 
 - welche Analysedaten wirklich noetig sind

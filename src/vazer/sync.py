@@ -41,6 +41,7 @@ class StreamInspection:
 @dataclass(slots=True)
 class CoarseSyncMeasurement:
     map_specifier: str
+    method: str
     camera_starts_at_master_seconds: float
     master_to_source_offset_seconds: float
     peak: float
@@ -193,6 +194,49 @@ def _find_correlation_peak(
     return lag_samples, peak, second_peak, peak_ratio
 
 
+def _top_correlation_candidates(
+    correlation: np.ndarray,
+    right_length: int,
+    lag_min_samples: int,
+    lag_max_samples: int,
+    exclusion_radius_samples: int,
+    count: int,
+) -> list[tuple[float, float, float | None, float | None]]:
+    start_index = max(0, lag_min_samples + right_length - 1)
+    end_index = min(correlation.size - 1, lag_max_samples + right_length - 1)
+    if end_index < start_index:
+        return []
+
+    window = correlation[start_index : end_index + 1].copy()
+    candidates: list[tuple[float, float, float | None, float | None]] = []
+    for _ in range(count):
+        if window.size == 0 or not np.isfinite(window).any():
+            break
+
+        relative_index = int(np.argmax(window))
+        peak = float(window[relative_index])
+        if not np.isfinite(peak):
+            break
+
+        best_index = start_index + relative_index
+        lag_samples = float(best_index - (right_length - 1))
+
+        exclusion_start = max(0, relative_index - exclusion_radius_samples)
+        exclusion_end = min(window.size - 1, relative_index + exclusion_radius_samples)
+        second_peak: float | None = None
+        if exclusion_start > 0:
+            second_peak = float(np.max(window[:exclusion_start]))
+        if exclusion_end < window.size - 1:
+            candidate = float(np.max(window[exclusion_end + 1 :]))
+            second_peak = candidate if second_peak is None else max(second_peak, candidate)
+
+        peak_ratio = peak / second_peak if second_peak and second_peak > 0 else None
+        candidates.append((lag_samples, peak, second_peak, peak_ratio))
+        window[exclusion_start : exclusion_end + 1] = -np.inf
+
+    return candidates
+
+
 def _fit_weighted_line(points: list[tuple[float, float, float]]) -> tuple[float, float]:
     if not points:
         raise ValueError("At least one point is required for weighted fitting.")
@@ -289,63 +333,170 @@ def _measure_coarse_offset(
     stream: StreamInspection,
     options: SyncOptions,
 ) -> CoarseSyncMeasurement:
-    probe_seconds = min(300.0, camera_duration_seconds)
-    search_max_seconds = max(0.0, master_duration_seconds - camera_duration_seconds + ALLOWED_MASTER_END_OVERHANG_SECONDS)
-    probe_starts = sorted(
-        {
-            0.0,
-            min(stream.loudest_window_start_seconds, max(camera_duration_seconds - probe_seconds, 0.0)),
-        }
-    )
-
-    best_candidate: tuple[float, float, float | None, float | None] | None = None
-    for probe_start_seconds in probe_starts:
-        master_excerpt_duration = min(
-            master_duration_seconds,
-            search_max_seconds + probe_start_seconds + probe_seconds + 5.0,
+    def bounded_search() -> tuple[float, float, float | None, float | None] | None:
+        probe_seconds = min(300.0, camera_duration_seconds)
+        search_max_seconds = max(0.0, master_duration_seconds - camera_duration_seconds + ALLOWED_MASTER_END_OVERHANG_SECONDS)
+        probe_starts = sorted(
+            {
+                0.0,
+                min(stream.loudest_window_start_seconds, max(camera_duration_seconds - probe_seconds, 0.0)),
+            }
         )
-        master_excerpt = decode_audio(
+
+        best_candidate: tuple[float, float, float | None, float | None] | None = None
+        for probe_start_seconds in probe_starts:
+            master_excerpt_duration = min(
+                master_duration_seconds,
+                search_max_seconds + probe_start_seconds + probe_seconds + 5.0,
+            )
+            master_excerpt = decode_audio(
+                master_path,
+                duration_seconds=master_excerpt_duration,
+                sample_rate=options.coarse_rate,
+                filters=_analysis_filters(),
+            )
+            camera_excerpt = decode_audio(
+                camera_path,
+                map_specifier=stream.map_specifier,
+                start_seconds=probe_start_seconds,
+                duration_seconds=probe_seconds,
+                sample_rate=options.coarse_rate,
+                filters=_analysis_filters(),
+            )
+
+            if master_excerpt.size == 0 or camera_excerpt.size == 0:
+                continue
+
+            correlation = _cross_correlate(_normalize_series(master_excerpt), _normalize_series(camera_excerpt))
+            lag_samples, peak, second_peak, peak_ratio = _find_correlation_peak(
+                correlation,
+                camera_excerpt.size,
+                round(probe_start_seconds * options.coarse_rate),
+                round((probe_start_seconds + search_max_seconds) * options.coarse_rate),
+                max(1, round(options.coarse_rate)),
+            )
+
+            camera_start_seconds = lag_samples / options.coarse_rate - probe_start_seconds
+            if camera_start_seconds < -1.0:
+                continue
+            if camera_start_seconds + camera_duration_seconds > master_duration_seconds + ALLOWED_MASTER_END_OVERHANG_SECONDS:
+                continue
+
+            candidate = (camera_start_seconds, peak, second_peak, peak_ratio)
+            if best_candidate is None or (peak_ratio or 0.0) > (best_candidate[3] or 0.0):
+                best_candidate = candidate
+
+        return best_candidate
+
+    def broad_cluster_search() -> tuple[float, float, float | None, float | None] | None:
+        probe_seconds = min(180.0, camera_duration_seconds)
+        max_start = max(camera_duration_seconds - probe_seconds, 0.0)
+        probe_starts = sorted(
+            {
+                0.0,
+                min(stream.loudest_window_start_seconds, max_start),
+                max_start * 0.25,
+                max_start * 0.5,
+                max_start * 0.75,
+            }
+        )
+
+        master_reference = decode_audio(
             master_path,
-            duration_seconds=master_excerpt_duration,
             sample_rate=options.coarse_rate,
             filters=_analysis_filters(),
         )
-        camera_excerpt = decode_audio(
-            camera_path,
-            map_specifier=stream.map_specifier,
-            start_seconds=probe_start_seconds,
-            duration_seconds=probe_seconds,
-            sample_rate=options.coarse_rate,
-            filters=_analysis_filters(),
+        if master_reference.size == 0:
+            return None
+        master_reference = _normalize_series(master_reference)
+
+        clusters: list[dict[str, Any]] = []
+        min_overlap_seconds = max(options.anchor_window_seconds * 2, 120.0)
+        for probe_index, probe_start_seconds in enumerate(probe_starts):
+            camera_excerpt = decode_audio(
+                camera_path,
+                map_specifier=stream.map_specifier,
+                start_seconds=probe_start_seconds,
+                duration_seconds=probe_seconds,
+                sample_rate=options.coarse_rate,
+                filters=_analysis_filters(),
+            )
+            if camera_excerpt.size == 0:
+                continue
+
+            correlation = _cross_correlate(master_reference, _normalize_series(camera_excerpt))
+            candidates = _top_correlation_candidates(
+                correlation,
+                camera_excerpt.size,
+                0,
+                master_reference.size - 1,
+                max(1, round(options.coarse_rate)),
+                6,
+            )
+
+            for lag_samples, peak, second_peak, peak_ratio in candidates:
+                camera_start_seconds = lag_samples / options.coarse_rate - probe_start_seconds
+                overlap_start_seconds = max(0.0, camera_start_seconds)
+                overlap_end_seconds = min(master_duration_seconds, camera_start_seconds + camera_duration_seconds)
+                if overlap_end_seconds - overlap_start_seconds < min_overlap_seconds:
+                    continue
+
+                score = (peak_ratio or 1.0) * max(peak, 1.0)
+                cluster = next(
+                    (
+                        item
+                        for item in clusters
+                        if abs(item["camera_start_seconds"] - camera_start_seconds) <= 3.0
+                    ),
+                    None,
+                )
+                if cluster is None:
+                    cluster = {
+                        "camera_start_seconds": camera_start_seconds,
+                        "weighted_sum": camera_start_seconds * score,
+                        "score_sum": score,
+                        "probe_indices": {probe_index},
+                        "best_peak": peak,
+                        "best_second_peak": second_peak,
+                        "best_peak_ratio": peak_ratio,
+                    }
+                    clusters.append(cluster)
+                else:
+                    cluster["weighted_sum"] += camera_start_seconds * score
+                    cluster["score_sum"] += score
+                    cluster["probe_indices"].add(probe_index)
+                    cluster["camera_start_seconds"] = cluster["weighted_sum"] / cluster["score_sum"]
+                    if (peak_ratio or 0.0) > (cluster["best_peak_ratio"] or 0.0):
+                        cluster["best_peak"] = peak
+                        cluster["best_second_peak"] = second_peak
+                        cluster["best_peak_ratio"] = peak_ratio
+
+        if not clusters:
+            return None
+
+        best_cluster = max(
+            clusters,
+            key=lambda item: (len(item["probe_indices"]), item["score_sum"], item["best_peak_ratio"] or 0.0),
+        )
+        return (
+            float(best_cluster["camera_start_seconds"]),
+            float(best_cluster["best_peak"]),
+            None if best_cluster["best_second_peak"] is None else float(best_cluster["best_second_peak"]),
+            None if best_cluster["best_peak_ratio"] is None else float(best_cluster["best_peak_ratio"]),
         )
 
-        if master_excerpt.size == 0 or camera_excerpt.size == 0:
-            continue
-
-        correlation = _cross_correlate(_normalize_series(master_excerpt), _normalize_series(camera_excerpt))
-        lag_samples, peak, second_peak, peak_ratio = _find_correlation_peak(
-            correlation,
-            camera_excerpt.size,
-            round(probe_start_seconds * options.coarse_rate),
-            round((probe_start_seconds + search_max_seconds) * options.coarse_rate),
-            max(1, round(options.coarse_rate)),
-        )
-
-        camera_start_seconds = lag_samples / options.coarse_rate - probe_start_seconds
-        if camera_start_seconds < -1.0:
-            continue
-        if camera_start_seconds + camera_duration_seconds > master_duration_seconds + ALLOWED_MASTER_END_OVERHANG_SECONDS:
-            continue
-
-        candidate = (camera_start_seconds, peak, second_peak, peak_ratio)
-        if best_candidate is None or (peak_ratio or 0.0) > (best_candidate[3] or 0.0):
-            best_candidate = candidate
+    best_candidate = bounded_search()
+    method = "bounded_direct"
+    if best_candidate is None:
+        best_candidate = broad_cluster_search()
+        method = "broad_cluster"
 
     if best_candidate is None:
         raise ValueError(f"Unable to derive a coarse sync candidate for stream {stream.map_specifier}.")
 
     return CoarseSyncMeasurement(
         map_specifier=stream.map_specifier,
+        method=method,
         camera_starts_at_master_seconds=float(best_candidate[0]),
         master_to_source_offset_seconds=float(-best_candidate[0]),
         peak=float(best_candidate[1]),

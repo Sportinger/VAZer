@@ -1,0 +1,87 @@
+# Render Scaffold
+
+## Zweck
+
+Der aktuelle Render-Schritt ist noch kein finaler `render run`, sondern ein Scaffold.
+
+Er erzeugt aus dem `cut_plan`:
+
+- einen `filter_complex`-Graph als Textdatei
+- eine konkrete ffmpeg-Commandline
+- ein JSON-Manifest fuer Debugging und spaetere Ausfuehrung
+
+## Warum zuerst ein Scaffold
+
+Das ist absichtlich konservativ:
+
+- der Filtergraph bleibt lesbar und diffbar
+- der ffmpeg-Command bleibt kurz
+- die Logik bleibt im Code statt in einem handgeschriebenen Monster-Command
+
+## Top-Level Manifest
+
+```json
+{
+  "schema_version": "vazer.render_scaffold.v1",
+  "generated_at_utc": "2026-03-17T16:22:00Z",
+  "tool": {},
+  "source_cut_plan": {},
+  "inputs": [],
+  "output": {},
+  "artifacts": {},
+  "ffmpeg": {}
+}
+```
+
+## Erzeugte Dateien
+
+- `sample-render.filtergraph.txt`
+- `sample-render.ffmpeg.txt`
+- `sample-render.render.json`
+
+## Aktueller CLI-Command
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer render scaffold --cut-plan .\artifacts\cut_plan.json --output-media .\out\final.mp4 --out-dir .\artifacts\render
+```
+
+## Aktueller ffmpeg-Ansatz
+
+Pro Video-Segment:
+
+- `trim` auf die berechnete Source-Zeit
+- `setpts` zur Korrektur kleiner Sync-Drift
+- `fps`, `scale`, `pad`, `format` zur Vereinheitlichung
+
+Pro Audio-Segment:
+
+- `atrim` aus dem Master-Audio
+- `asetpts`
+
+Danach:
+
+- Video-Segmente via `concat`
+- Audio-Segmente via `concat`
+
+Der generierte Command nutzt die dateibasierte ffmpeg-Variante `-/filter_complex`, damit der Filtergraph nicht als ein einziger Kommandozeilenblock im Shell-Command landen muss.
+
+## Beispiel aus dem Sample
+
+```text
+[1:v]trim=...,setpts=...,fps=25.000000,scale=3840:2160,...[v1]
+[v1]concat=n=1:v=1:a=0[vout]
+[0:a]atrim=...,asetpts=PTS-STARTPTS[a1]
+[a1]concat=n=1:v=0:a=1[aout]
+```
+
+## Bewusste Grenzen von v1
+
+- noch keine Ausfuehrung des Render-Commands durch VAZer
+- noch keine Transitionen
+- noch kein Multi-Track-Audio-Mix
+- noch keine Validierung gegen exotische Codec-/Filter-Kombinationen
+
+## Validierungsstand
+
+Der Scaffold wurde gegen den Ordner `D:\VAZ_Chaos\Medien` mit drei MXF-Kameras plus Master-WAV erzeugt und per ffmpeg-Parse-Test erfolgreich angenommen.

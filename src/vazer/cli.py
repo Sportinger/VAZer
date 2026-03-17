@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .cut_plan import build_baseline_cut_plan, load_json_artifact, write_cut_plan
+from .render import build_render_scaffold, load_cut_plan
 from .sync import SyncOptions, analyze_sync
 from .sync_map import build_sync_map, write_sync_map
 
@@ -47,6 +49,29 @@ def _build_parser() -> argparse.ArgumentParser:
     map_parser.add_argument("--anchor-search", type=float, default=SyncOptions().anchor_search_seconds)
     map_parser.add_argument("--json", action="store_true", help="Print the generated sync_map JSON to stdout.")
 
+    plan_parser = root_subparsers.add_parser("plan", help="Cut-plan generation.")
+    plan_subparsers = plan_parser.add_subparsers(dest="plan_command")
+
+    baseline_parser = plan_subparsers.add_parser(
+        "baseline",
+        help="Build a baseline cut_plan from an existing sync_map.",
+    )
+    baseline_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    baseline_parser.add_argument("--out", required=True, help="Path to the cut_plan JSON output.")
+    baseline_parser.add_argument("--json", action="store_true", help="Print the generated cut_plan JSON to stdout.")
+
+    render_parser = root_subparsers.add_parser("render", help="Render scaffolding.")
+    render_subparsers = render_parser.add_subparsers(dest="render_command")
+
+    scaffold_parser = render_subparsers.add_parser(
+        "scaffold",
+        help="Build ffmpeg scaffold files from a cut_plan.",
+    )
+    scaffold_parser.add_argument("--cut-plan", required=True, help="Path to a cut_plan JSON file.")
+    scaffold_parser.add_argument("--output-media", required=True, help="Target media file path for the ffmpeg command.")
+    scaffold_parser.add_argument("--out-dir", required=True, help="Directory for scaffold artifacts.")
+    scaffold_parser.add_argument("--json", action="store_true", help="Print the render manifest JSON to stdout.")
+
     return parser
 
 
@@ -55,7 +80,17 @@ def _format_signed_seconds(value: float) -> str:
     return f"{prefix}{value:.3f} s"
 
 
-def _print_summary(report: dict[str, Any]) -> None:
+def _build_sync_options(args: argparse.Namespace) -> SyncOptions:
+    return SyncOptions(
+        coarse_rate=args.coarse_rate,
+        fine_rate=args.fine_rate,
+        anchor_count=args.anchor_count,
+        anchor_window_seconds=args.anchor_window,
+        anchor_search_seconds=args.anchor_search,
+    )
+
+
+def _print_probe_summary(report: dict[str, Any]) -> None:
     selected_stream = report["camera"]["selected_stream"]
     mapping = report["mapping"]
     accepted = report["anchors"]["accepted"]
@@ -103,60 +138,105 @@ def _print_sync_map_summary(sync_map: dict[str, Any], output_path: Path) -> None
         print(f"[failed] {Path(entry['path']).name}: {entry['error']}")
 
 
-def _build_sync_options(args: argparse.Namespace) -> SyncOptions:
-    return SyncOptions(
-        coarse_rate=args.coarse_rate,
-        fine_rate=args.fine_rate,
-        anchor_count=args.anchor_count,
-        anchor_window_seconds=args.anchor_window,
-        anchor_search_seconds=args.anchor_search,
+def _print_cut_plan_summary(cut_plan: dict[str, Any], output_path: Path) -> None:
+    summary = cut_plan["summary"]
+    timeline = cut_plan["timeline"]
+    print(f"Cut plan written to: {output_path}")
+    print(
+        f"Output duration: {timeline['output_duration_seconds']:.3f} s "
+        f"across {summary['video_segments']} video segments"
     )
+    print(f"Selected assets: {', '.join(summary['selected_assets'])}")
+    if summary["dropped_assets"]:
+        print(f"Dropped synced assets: {', '.join(summary['dropped_assets'])}")
+
+
+def _print_render_scaffold_summary(manifest: dict[str, Any]) -> None:
+    artifacts = manifest["artifacts"]
+    output = manifest["output"]
+    print(f"Render scaffold written to: {artifacts['manifest_path']}")
+    print(f"Filtergraph: {artifacts['filtergraph_path']}")
+    print(f"Command file: {artifacts['command_path']}")
+    print(f"Target media: {output['path']}")
+    print(f"Output duration: {output['duration_seconds']:.3f} s")
 
 
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    if args.command != "sync" or args.sync_command not in {"probe", "map"}:
+    if args.command == "sync":
+        options = _build_sync_options(args)
+
+        if args.sync_command == "probe":
+            try:
+                report = analyze_sync(
+                    args.master,
+                    args.camera,
+                    requested_stream=args.stream,
+                    options=options,
+                )
+            except Exception as error:  # pragma: no cover - CLI surface
+                parser.exit(1, f"VAZer error: {error}\n")
+
+            if args.json:
+                print(json.dumps(report, indent=2))
+            else:
+                _print_probe_summary(report)
+            return 0
+
+        if args.sync_command == "map":
+            try:
+                sync_map = build_sync_map(
+                    args.master,
+                    args.cameras,
+                    options=options,
+                )
+                output_path = write_sync_map(sync_map, args.out)
+            except Exception as error:  # pragma: no cover - CLI surface
+                parser.exit(1, f"VAZer error: {error}\n")
+
+            if args.json:
+                print(json.dumps(sync_map, indent=2))
+            else:
+                _print_sync_map_summary(sync_map, output_path)
+
+            return 0 if sync_map["summary"]["synced"] > 0 else 1
+
         parser.print_help()
         return 1
 
-    options = _build_sync_options(args)
-
-    if args.sync_command == "probe":
+    if args.command == "plan" and args.plan_command == "baseline":
         try:
-            report = analyze_sync(
-                args.master,
-                args.camera,
-                requested_stream=args.stream,
-                options=options,
+            sync_map = load_json_artifact(args.sync_map)
+            cut_plan = build_baseline_cut_plan(sync_map, source_sync_map_path=args.sync_map)
+            output_path = write_cut_plan(cut_plan, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(cut_plan, indent=2))
+        else:
+            _print_cut_plan_summary(cut_plan, output_path)
+        return 0
+
+    if args.command == "render" and args.render_command == "scaffold":
+        try:
+            cut_plan = load_cut_plan(args.cut_plan)
+            manifest = build_render_scaffold(
+                cut_plan,
+                cut_plan_path=args.cut_plan,
+                output_media_path=args.output_media,
+                scaffold_dir=args.out_dir,
             )
         except Exception as error:  # pragma: no cover - CLI surface
             parser.exit(1, f"VAZer error: {error}\n")
 
         if args.json:
-            print(json.dumps(report, indent=2))
+            print(json.dumps(manifest, indent=2))
         else:
-            _print_summary(report)
-
+            _print_render_scaffold_summary(manifest)
         return 0
 
-    try:
-        sync_map = build_sync_map(
-            args.master,
-            args.cameras,
-            options=options,
-        )
-        output_path = write_sync_map(sync_map, args.out)
-    except Exception as error:  # pragma: no cover - CLI surface
-        parser.exit(1, f"VAZer error: {error}\n")
-
-    if args.json:
-        print(json.dumps(sync_map, indent=2))
-    else:
-        _print_sync_map_summary(sync_map, output_path)
-
-    if sync_map["summary"]["synced"] == 0:
-        return 1
-
-    return 0
+    parser.print_help()
+    return 1
