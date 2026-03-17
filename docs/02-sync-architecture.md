@@ -137,6 +137,13 @@ $env:PYTHONPATH='src'
 python -m vazer sync probe --master <master.wav> --camera <clip.mxf>
 ```
 
+Batch-Persistierung:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer sync map --master <master.wav> --camera <cam1> --camera <cam2> --out .\artifacts\sync_map.json
+```
+
 Optional:
 
 - `--stream 0:1`
@@ -151,12 +158,12 @@ Optional:
 
 - Der Coarse Sync geht derzeit von einer weitgehend vom Master umschlossenen Kamera-Datei aus.
 - Noch kein piecewise Sync bei harten Recorder-Spruengen.
-- Noch keine Persistierung als `sync_map`-Datei im Repo.
+- `sync_map` ist jetzt persistierbar, aber noch ohne manuelle Overrides oder Review-Flags.
 - Noch kein automatischer Render-Schritt.
 
 ## Naechste technische Schritte
 
-1. `sync probe` in ein persistierbares `sync_map`-Artefakt ueberfuehren.
-2. Mehrere Kamera-Dateien in einem Lauf gegen dieselbe Masterspur messen.
-3. Residualfehler je Anchor explizit ausgeben und Grenzwerte haerter machen.
-4. Danach den `cut_plan` auf genau dieser Timeline aufbauen.
+1. Residualfehler je Anchor explizit ausgeben und Grenzwerte haerter machen.
+2. piecewise Sync einfuehren, wenn lineare Drift nicht reicht.
+3. danach den `cut_plan` auf genau dieser Timeline aufbauen.
+4. schliesslich `ffmpeg`-Render aus `sync_map` und spaeterem `cut_plan` erzeugen.

@@ -239,7 +239,7 @@ Alles andere spaeter:
 
 Der naechste Schritt teilt sich jetzt sinnvoll in zwei Ebenen:
 
-1. `sync_map` als persistierbares JSON-Format festziehen
+1. `sync_map` weiter haerten und als Batch-Artefakt nutzen
 2. danach den Schnittplan als konkretes JSON-Schema definieren
 
 Warum diese Reihenfolge:

@@ -25,6 +25,7 @@ Warum Python fuer diesen Start:
 - einen groben Startpunkt auf der Master-Timeline finden
 - mehrere Fine-Sync-Anker messen
 - lineares Zeitmodell `source_time = speed * master_time + offset` fitten
+- mehrere Kamera-Dateien in ein gemeinsames `sync_map.json` schreiben
 
 ## Smoke-Test mit den Beispiel-Dateien
 
@@ -55,9 +56,15 @@ $env:PYTHONPATH='src'
 python -m vazer sync probe --master <master> --camera <camera> --json
 ```
 
+Batch-Export:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer sync map --master <master> --camera <cam1> --camera <cam2> --out .\artifacts\sync_map.json
+```
+
 ## Was noch fehlt
 
-- Persistierung eines `sync_map.json`
-- Batch-Verarbeitung fuer mehrere Kameras
 - explizite Fehlerschwellen und Quality-Gates
+- manuelle Overrides und Review-Flags im `sync_map`
 - Render-Stufe aus `sync_map` und spaeterem `cut_plan`
