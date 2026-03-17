@@ -17,6 +17,8 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [10-theater-vaz-profile.md](./10-theater-vaz-profile.md): fester Produktscope fuer Theater-VAZ statt generischem Multicam
 - [11-llm-draft-prompt.md](./11-llm-draft-prompt.md): erste feste System-Prompt-Vorlage fuer den spaeteren AI-Draft-Planer
 - [12-visual-packet.md](./12-visual-packet.md): gezielte Stills pro Zeitfenster als multimodaler Input fuer spaetere AI-Planung
+- [13-ai-draft.md](./13-ai-draft.md): erster echter OpenAI-Draft-Planer fuer kleine Theater-Teilfenster
+- [14-sample-set.md](./14-sample-set.md): gestaffelte 1m/5m-Testsets fuer schnelle End-to-End-Pipeline-Checks
 
 ## Naechste Docs
 

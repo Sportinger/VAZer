@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .analysis import AnalysisOptions, build_analysis_map, load_analysis_map, write_analysis_map
+from .ai_draft import AIDraftOptions, build_ai_draft_cut_plan
 from .cut_plan import DraftPlanOptions, build_baseline_cut_plan, build_draft_cut_plan, load_json_artifact, write_cut_plan
 from .cut_review import (
     CutValidationOptions,
@@ -15,11 +16,12 @@ from .cut_review import (
     write_cut_validation_report,
 )
 from .render import build_render_scaffold, load_cut_plan
+from .sample_set import SampleSetOptions, build_sample_set
 from .sync import SyncOptions, analyze_sync
 from .sync_map import build_sync_map, write_sync_map
 from .transcribe import TranscriptionOptions, build_master_transcript, write_transcript_artifact
 from .transcript import load_transcript_artifact
-from .visual_packet import VisualPacketOptions, build_visual_packet, write_visual_packet
+from .visual_packet import VisualPacketOptions, build_visual_packet, load_visual_packet, write_visual_packet
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -148,6 +150,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     repair_parser.add_argument("--json", action="store_true", help="Print the repaired cut_plan JSON to stdout.")
 
+    ai_draft_parser = plan_subparsers.add_parser(
+        "ai-draft",
+        help="Ask OpenAI for a theater-specific draft cut_plan from transcript plus visual packet.",
+    )
+    ai_draft_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    ai_draft_parser.add_argument("--visual-packet", required=True, help="Path to a visual_packet JSON file.")
+    ai_draft_parser.add_argument("--analysis", help="Optional analysis_map JSON file.")
+    ai_draft_parser.add_argument("--transcript", help="Optional transcript JSON file.")
+    ai_draft_parser.add_argument("--out", required=True, help="Path to the AI-generated cut_plan JSON output.")
+    ai_draft_parser.add_argument("--model", default=AIDraftOptions().model)
+    ai_draft_parser.add_argument("--max-output-tokens", type=int, default=AIDraftOptions().max_output_tokens)
+    ai_draft_parser.add_argument("--temperature", type=float, default=AIDraftOptions().temperature)
+    ai_draft_parser.add_argument("--notes", help="Optional extra planning notes for the AI.")
+    ai_draft_parser.add_argument("--master-start", type=float, help="Optional explicit master-time span start.")
+    ai_draft_parser.add_argument("--master-end", type=float, help="Optional explicit master-time span end.")
+    ai_draft_parser.add_argument("--json", action="store_true", help="Print the generated cut_plan JSON to stdout.")
+
     analyze_parser = root_subparsers.add_parser("analyze", help="Technical signal analysis.")
     analyze_subparsers = analyze_parser.add_subparsers(dest="analyze_command")
 
@@ -262,6 +281,32 @@ def _build_parser() -> argparse.ArgumentParser:
     scaffold_parser.add_argument("--out-dir", required=True, help="Directory for scaffold artifacts.")
     scaffold_parser.add_argument("--json", action="store_true", help="Print the render manifest JSON to stdout.")
 
+    sample_parser = root_subparsers.add_parser("sample", help="Generate small synced media subsets for pipeline tests.")
+    sample_subparsers = sample_parser.add_subparsers(dest="sample_command")
+
+    sample_set_parser = sample_subparsers.add_parser(
+        "set",
+        help="Build overlapping test windows with staggered camera starts from an existing sync_map.",
+    )
+    sample_set_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    sample_set_parser.add_argument("--out-dir", required=True, help="Directory for the generated sample set.")
+    sample_set_parser.add_argument("--duration", type=float, default=SampleSetOptions().duration_seconds)
+    sample_set_parser.add_argument("--window-count", type=int, default=SampleSetOptions().window_count)
+    sample_set_parser.add_argument("--stagger-ratio", type=float, default=SampleSetOptions().stagger_ratio)
+    sample_set_parser.add_argument(
+        "--mode",
+        choices=["copy", "reencode"],
+        default=SampleSetOptions().mode,
+        help="Fast stream copy or cleaner re-encode for the generated camera slices.",
+    )
+    sample_set_parser.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        help="Optional camera role override as ASSET_ID=totale|close|halbtotale.",
+    )
+    sample_set_parser.add_argument("--json", action="store_true", help="Print the generated sample_set JSON to stdout.")
+
     return parser
 
 
@@ -320,6 +365,17 @@ def _build_cut_validation_options(args: argparse.Namespace) -> CutValidationOpti
     )
 
 
+def _build_ai_draft_options(args: argparse.Namespace) -> AIDraftOptions:
+    return AIDraftOptions(
+        model=args.model,
+        max_output_tokens=args.max_output_tokens,
+        temperature=args.temperature,
+        user_notes=args.notes,
+        master_start_seconds=args.master_start,
+        master_end_seconds=args.master_end,
+    )
+
+
 def _parse_role_overrides(values: list[str]) -> dict[str, str]:
     overrides: dict[str, str] = {}
     for value in values:
@@ -348,6 +404,16 @@ def _build_visual_packet_options(args: argparse.Namespace) -> VisualPacketOption
         image_quality=args.image_quality,
         cut_context_seconds=args.cut_context,
         max_windows=args.max_windows,
+        role_overrides=_parse_role_overrides(args.role),
+    )
+
+
+def _build_sample_set_options(args: argparse.Namespace) -> SampleSetOptions:
+    return SampleSetOptions(
+        duration_seconds=args.duration,
+        window_count=args.window_count,
+        stagger_ratio=args.stagger_ratio,
+        mode=args.mode,
         role_overrides=_parse_role_overrides(args.role),
     )
 
@@ -510,6 +576,16 @@ def _print_visual_packet_summary(packet: dict[str, Any], output_path: Path) -> N
     )
 
 
+def _print_sample_set_summary(sample_set: dict[str, Any], output_dir: Path) -> None:
+    summary = sample_set["summary"]
+    print(f"Sample set written to: {output_dir}")
+    print(
+        f"Windows: {summary['window_count']}, "
+        f"camera files: {summary['camera_files']}, "
+        f"duration per window: {summary['duration_seconds']:.1f} s"
+    )
+
+
 def _resolve_optional_artifact_path(
     explicit_path: str | None,
     artifact_payload: dict[str, Any] | None,
@@ -652,6 +728,33 @@ def main() -> int:
             _print_cut_plan_summary(repaired_cut_plan, output_path)
         return 0
 
+    if args.command == "plan" and args.plan_command == "ai-draft":
+        try:
+            sync_map = load_json_artifact(args.sync_map)
+            visual_packet = load_visual_packet(args.visual_packet)
+            analysis_map = None if not args.analysis else load_analysis_map(args.analysis)
+            transcript_artifact = None if not args.transcript else load_transcript_artifact(args.transcript)
+            ai_cut_plan = build_ai_draft_cut_plan(
+                sync_map,
+                source_sync_map_path=args.sync_map,
+                visual_packet=visual_packet,
+                source_visual_packet_path=args.visual_packet,
+                analysis_map=analysis_map,
+                source_analysis_path=args.analysis,
+                transcript_artifact=transcript_artifact,
+                source_transcript_path=args.transcript,
+                options=_build_ai_draft_options(args),
+            )
+            output_path = write_cut_plan(ai_cut_plan, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(ai_cut_plan, indent=2))
+        else:
+            _print_cut_plan_summary(ai_cut_plan, output_path)
+        return 0
+
     if args.command == "analyze" and args.analyze_command == "technical":
         try:
             sync_map = load_json_artifact(args.sync_map)
@@ -742,6 +845,24 @@ def main() -> int:
             print(json.dumps(manifest, indent=2))
         else:
             _print_render_scaffold_summary(manifest)
+        return 0
+
+    if args.command == "sample" and args.sample_command == "set":
+        try:
+            sync_map = load_json_artifact(args.sync_map)
+            sample_set = build_sample_set(
+                sync_map,
+                source_sync_map_path=args.sync_map,
+                output_dir=args.out_dir,
+                options=_build_sample_set_options(args),
+            )
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(sample_set, indent=2))
+        else:
+            _print_sample_set_summary(sample_set, Path(args.out_dir))
         return 0
 
     parser.print_help()
