@@ -16,6 +16,7 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [09-cut-review-workflow.md](./09-cut-review-workflow.md): `draft -> validate -> repair` fuer lokale technische Pruefung von Cut-Stellen
 - [10-theater-vaz-profile.md](./10-theater-vaz-profile.md): fester Produktscope fuer Theater-VAZ statt generischem Multicam
 - [11-llm-draft-prompt.md](./11-llm-draft-prompt.md): erste feste System-Prompt-Vorlage fuer den spaeteren AI-Draft-Planer
+- [12-visual-packet.md](./12-visual-packet.md): gezielte Stills pro Zeitfenster als multimodaler Input fuer spaetere AI-Planung
 
 ## Naechste Docs
 

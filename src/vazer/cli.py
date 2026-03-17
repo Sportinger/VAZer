@@ -19,6 +19,7 @@ from .sync import SyncOptions, analyze_sync
 from .sync_map import build_sync_map, write_sync_map
 from .transcribe import TranscriptionOptions, build_master_transcript, write_transcript_artifact
 from .transcript import load_transcript_artifact
+from .visual_packet import VisualPacketOptions, build_visual_packet, write_visual_packet
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -165,6 +166,71 @@ def _build_parser() -> argparse.ArgumentParser:
     technical_parser.add_argument("--analysis-width", type=int, default=AnalysisOptions().analysis_width)
     technical_parser.add_argument("--json", action="store_true", help="Print the generated analysis_map JSON to stdout.")
 
+    visuals_parser = analyze_subparsers.add_parser(
+        "visuals",
+        help="Build a visual_packet with sparse stills for AI planning or cut review.",
+    )
+    visuals_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    visuals_parser.add_argument("--analysis", help="Optional analysis_map JSON file.")
+    visuals_parser.add_argument("--transcript", help="Optional transcript JSON file.")
+    visuals_parser.add_argument("--cut-plan", help="Optional cut_plan JSON file. If present, visuals can focus on cuts.")
+    visuals_parser.add_argument("--out", required=True, help="Path to the visual_packet JSON output.")
+    visuals_parser.add_argument("--out-dir", required=True, help="Directory for exported still images.")
+    visuals_parser.add_argument(
+        "--mode",
+        choices=["auto", "overview", "cuts"],
+        default=VisualPacketOptions().mode,
+        help="Choose overview sampling or cut-focused sampling.",
+    )
+    visuals_parser.add_argument(
+        "--interval",
+        type=float,
+        default=VisualPacketOptions().interval_seconds,
+        help="Master-time sampling interval for overview packets.",
+    )
+    visuals_parser.add_argument(
+        "--window-context",
+        type=float,
+        default=VisualPacketOptions().window_context_seconds,
+        help="Master-time context length stored around overview samples.",
+    )
+    visuals_parser.add_argument(
+        "--transcript-context",
+        type=float,
+        default=VisualPacketOptions().transcript_context_seconds,
+        help="Context length used for transcript excerpts around each visual window.",
+    )
+    visuals_parser.add_argument(
+        "--image-width",
+        type=int,
+        default=VisualPacketOptions().image_width,
+        help="Maximum exported still width.",
+    )
+    visuals_parser.add_argument(
+        "--image-quality",
+        type=int,
+        default=VisualPacketOptions().image_quality,
+        help="JPEG quality for exported stills.",
+    )
+    visuals_parser.add_argument(
+        "--cut-context",
+        type=float,
+        default=VisualPacketOptions().cut_context_seconds,
+        help="Half-context around each cut when mode=cuts.",
+    )
+    visuals_parser.add_argument(
+        "--max-windows",
+        type=int,
+        help="Optional cap on the number of exported windows.",
+    )
+    visuals_parser.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        help="Optional camera role override as ASSET_ID=totale|close|halbtotale.",
+    )
+    visuals_parser.add_argument("--json", action="store_true", help="Print the generated visual_packet JSON to stdout.")
+
     transcribe_parser = root_subparsers.add_parser("transcribe", help="Master-audio transcription.")
     transcribe_subparsers = transcribe_parser.add_subparsers(dest="transcribe_command")
 
@@ -251,6 +317,38 @@ def _build_cut_validation_options(args: argparse.Namespace) -> CutValidationOpti
         local_probe_delta_seconds=args.probe_delta,
         local_probe_width=args.probe_width,
         repair_min_segment_seconds=getattr(args, "repair_min_segment", CutValidationOptions().repair_min_segment_seconds),
+    )
+
+
+def _parse_role_overrides(values: list[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"Invalid --role value '{value}'. Expected ASSET_ID=ROLE.")
+        asset_id, role = value.split("=", 1)
+        normalized_asset_id = asset_id.strip()
+        normalized_role = role.strip().lower()
+        if normalized_role not in {"totale", "close", "halbtotale"}:
+            raise ValueError(
+                f"Invalid role '{role}' for asset '{asset_id}'. Use totale, close, or halbtotale."
+            )
+        if not normalized_asset_id:
+            raise ValueError(f"Invalid --role value '{value}'. Asset id is empty.")
+        overrides[normalized_asset_id] = normalized_role
+    return overrides
+
+
+def _build_visual_packet_options(args: argparse.Namespace) -> VisualPacketOptions:
+    return VisualPacketOptions(
+        mode=args.mode,
+        interval_seconds=args.interval,
+        window_context_seconds=args.window_context,
+        transcript_context_seconds=args.transcript_context,
+        image_width=args.image_width,
+        image_quality=args.image_quality,
+        cut_context_seconds=args.cut_context,
+        max_windows=args.max_windows,
+        role_overrides=_parse_role_overrides(args.role),
     )
 
 
@@ -391,6 +489,25 @@ def _print_cut_validation_summary(report: dict[str, Any], output_path: Path) -> 
         f"{summary['ok']} ok, {summary['warn']} warn, {summary['fail']} fail"
     )
     print(f"Repairable cuts: {summary['repairable']}")
+
+
+def _print_visual_packet_summary(packet: dict[str, Any], output_path: Path) -> None:
+    summary = packet["summary"]
+    print(f"Visual packet written to: {output_path}")
+    print(
+        f"Mode: {summary['mode']}, "
+        f"windows: {summary['window_count']}, "
+        f"images: {summary['image_count']}"
+    )
+    print(f"Selected assets: {', '.join(summary['selected_assets'])}")
+    role_counts = summary["role_image_counts"]
+    print(
+        "Role images: "
+        f"close {role_counts['close']}, "
+        f"halbtotale {role_counts['halbtotale']}, "
+        f"totale {role_counts['totale']}, "
+        f"unknown {role_counts['unknown']}"
+    )
 
 
 def _resolve_optional_artifact_path(
@@ -552,6 +669,34 @@ def main() -> int:
         else:
             _print_analysis_map_summary(analysis_map, output_path)
         return 0 if analysis_map["summary"]["analyzed"] > 0 else 1
+
+    if args.command == "analyze" and args.analyze_command == "visuals":
+        try:
+            sync_map = load_json_artifact(args.sync_map)
+            analysis_map = None if not args.analysis else load_analysis_map(args.analysis)
+            transcript_artifact = None if not args.transcript else load_transcript_artifact(args.transcript)
+            cut_plan = None if not args.cut_plan else load_cut_plan(args.cut_plan)
+            visual_packet = build_visual_packet(
+                sync_map,
+                source_sync_map_path=args.sync_map,
+                analysis_map=analysis_map,
+                source_analysis_path=args.analysis,
+                transcript_artifact=transcript_artifact,
+                source_transcript_path=args.transcript,
+                cut_plan=cut_plan,
+                source_cut_plan_path=args.cut_plan,
+                output_dir=args.out_dir,
+                options=_build_visual_packet_options(args),
+            )
+            output_path = write_visual_packet(visual_packet, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(visual_packet, indent=2))
+        else:
+            _print_visual_packet_summary(visual_packet, output_path)
+        return 0 if visual_packet["summary"]["image_count"] > 0 else 1
 
     if args.command == "transcribe" and args.transcribe_command == "master":
         try:

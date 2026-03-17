@@ -46,6 +46,7 @@ Der Prompt soll spaeter mindestens diese Inputs bekommen:
 - `sync_map`
 - `analysis_map`
 - `transcript` mit `words`
+- `visual_packet`
 - Kamera-Rollen:
   - welche Kamera ist `totale`
   - welche ist `close`

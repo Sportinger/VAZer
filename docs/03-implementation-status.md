@@ -26,6 +26,7 @@ Aktueller Produktscope:
 - `src/vazer/cut_plan.py`: baseline- und signal-aware Planer
 - `src/vazer/cut_review.py`: lokale Cut-Validierung und deterministische Reparatur
 - `src/vazer/draft_prompt.py`: feste Theater-VAZ-System-Prompt fuer den spaeteren AI-Draft-Planer
+- `src/vazer/visual_packet.py`: gezielte Stills plus Transcript-/Signal-Kontext fuer spaetere multimodale AI-Aufrufe
 - `src/vazer/render.py`: ffmpeg-Scaffold aus `cut_plan`
 - `src/vazer/transcribe.py`: OpenAI-Transcription nur fuer das Master-Audio
 - `src/vazer/transcript.py`: Loader fuer externe Transcript-Artefakte
@@ -47,6 +48,7 @@ Aktueller Produktscope:
 - einen bestehenden Plan deterministisch in ein `cut_plan.repaired.json` ueberfuehren
 - einen ffmpeg-Render-Scaffold aus `cut_plan` erzeugen
 - einen festen Theater-VAZ-Prompt und Domain-Profile im Repo halten
+- ein `visual_packet` mit gezielten Kamera-Stills fuer AI-Planung oder lokale Review-Faelle bauen
 
 ## Smoke-Test mit den Beispiel-Dateien
 
