@@ -5,10 +5,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .analysis import AnalysisOptions, build_analysis_map, load_analysis_map, write_analysis_map
 from .cut_plan import build_baseline_cut_plan, load_json_artifact, write_cut_plan
 from .render import build_render_scaffold, load_cut_plan
 from .sync import SyncOptions, analyze_sync
 from .sync_map import build_sync_map, write_sync_map
+from .transcript import load_transcript_artifact
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -57,8 +59,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Build a baseline cut_plan from an existing sync_map.",
     )
     baseline_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    baseline_parser.add_argument("--analysis", help="Optional analysis_map JSON file.")
+    baseline_parser.add_argument("--transcript", help="Optional transcript JSON file.")
     baseline_parser.add_argument("--out", required=True, help="Path to the cut_plan JSON output.")
     baseline_parser.add_argument("--json", action="store_true", help="Print the generated cut_plan JSON to stdout.")
+
+    analyze_parser = root_subparsers.add_parser("analyze", help="Technical signal analysis.")
+    analyze_subparsers = analyze_parser.add_subparsers(dest="analyze_command")
+
+    technical_parser = analyze_subparsers.add_parser(
+        "technical",
+        help="Build an analysis_map with speech-like master activity and camera quality windows.",
+    )
+    technical_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    technical_parser.add_argument("--out", required=True, help="Path to the analysis_map JSON output.")
+    technical_parser.add_argument("--audio-rate", type=int, default=AnalysisOptions().audio_rate)
+    technical_parser.add_argument("--audio-frame", type=float, default=AnalysisOptions().audio_frame_seconds)
+    technical_parser.add_argument("--speech-merge-gap", type=float, default=AnalysisOptions().speech_merge_gap_seconds)
+    technical_parser.add_argument("--speech-min-segment", type=float, default=AnalysisOptions().speech_min_segment_seconds)
+    technical_parser.add_argument("--video-sample-interval", type=float, default=AnalysisOptions().video_sample_interval_seconds)
+    technical_parser.add_argument("--video-window", type=float, default=AnalysisOptions().video_window_seconds)
+    technical_parser.add_argument("--analysis-width", type=int, default=AnalysisOptions().analysis_width)
+    technical_parser.add_argument("--json", action="store_true", help="Print the generated analysis_map JSON to stdout.")
 
     render_parser = root_subparsers.add_parser("render", help="Render scaffolding.")
     render_subparsers = render_parser.add_subparsers(dest="render_command")
@@ -87,6 +109,18 @@ def _build_sync_options(args: argparse.Namespace) -> SyncOptions:
         anchor_count=args.anchor_count,
         anchor_window_seconds=args.anchor_window,
         anchor_search_seconds=args.anchor_search,
+    )
+
+
+def _build_analysis_options(args: argparse.Namespace) -> AnalysisOptions:
+    return AnalysisOptions(
+        audio_rate=args.audio_rate,
+        audio_frame_seconds=args.audio_frame,
+        speech_merge_gap_seconds=args.speech_merge_gap,
+        speech_min_segment_seconds=args.speech_min_segment,
+        video_sample_interval_seconds=args.video_sample_interval,
+        video_window_seconds=args.video_window,
+        analysis_width=args.analysis_width,
     )
 
 
@@ -149,6 +183,30 @@ def _print_cut_plan_summary(cut_plan: dict[str, Any], output_path: Path) -> None
     print(f"Selected assets: {', '.join(summary['selected_assets'])}")
     if summary["dropped_assets"]:
         print(f"Dropped synced assets: {', '.join(summary['dropped_assets'])}")
+    print(f"Signal-aware planning: {'yes' if summary['signal_aware'] else 'no'}")
+
+
+def _print_analysis_map_summary(analysis_map: dict[str, Any], output_path: Path) -> None:
+    summary = analysis_map["summary"]
+    speech_summary = analysis_map["master_audio_activity"]["summary"]
+    threshold_dbfs = speech_summary["threshold_dbfs"]
+    print(f"Analysis map written to: {output_path}")
+    print(
+        f"Entries: {summary['total']} total, {summary['analyzed']} analyzed, {summary['failed']} failed"
+    )
+    print(
+        f"Master speech-like segments: {speech_summary['segment_count']} "
+        f"(threshold {'n/a' if threshold_dbfs is None else f'{threshold_dbfs:.2f} dBFS'})"
+    )
+    for entry in analysis_map["entries"]:
+        if entry["status"] == "analyzed":
+            entry_summary = entry["summary"]
+            print(
+                f"[ok] {Path(entry['path']).name}: {entry_summary['window_count']} windows, "
+                f"usable ratio {entry_summary['usable_window_ratio']:.3f}"
+            )
+        else:
+            print(f"[failed] {Path(entry['path']).name}: {entry['error']}")
 
 
 def _print_render_scaffold_summary(manifest: dict[str, Any]) -> None:
@@ -209,7 +267,16 @@ def main() -> int:
     if args.command == "plan" and args.plan_command == "baseline":
         try:
             sync_map = load_json_artifact(args.sync_map)
-            cut_plan = build_baseline_cut_plan(sync_map, source_sync_map_path=args.sync_map)
+            analysis_map = None if not args.analysis else load_analysis_map(args.analysis)
+            transcript_artifact = None if not args.transcript else load_transcript_artifact(args.transcript)
+            cut_plan = build_baseline_cut_plan(
+                sync_map,
+                source_sync_map_path=args.sync_map,
+                analysis_map=analysis_map,
+                source_analysis_path=args.analysis,
+                transcript_artifact=transcript_artifact,
+                source_transcript_path=args.transcript,
+            )
             output_path = write_cut_plan(cut_plan, args.out)
         except Exception as error:  # pragma: no cover - CLI surface
             parser.exit(1, f"VAZer error: {error}\n")
@@ -219,6 +286,24 @@ def main() -> int:
         else:
             _print_cut_plan_summary(cut_plan, output_path)
         return 0
+
+    if args.command == "analyze" and args.analyze_command == "technical":
+        try:
+            sync_map = load_json_artifact(args.sync_map)
+            analysis_map = build_analysis_map(
+                sync_map,
+                source_sync_map_path=args.sync_map,
+                options=_build_analysis_options(args),
+            )
+            output_path = write_analysis_map(analysis_map, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(analysis_map, indent=2))
+        else:
+            _print_analysis_map_summary(analysis_map, output_path)
+        return 0 if analysis_map["summary"]["analyzed"] > 0 else 1
 
     if args.command == "render" and args.render_command == "scaffold":
         try:

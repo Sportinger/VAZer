@@ -84,4 +84,10 @@ Der generierte Command nutzt die dateibasierte ffmpeg-Variante `-/filter_complex
 
 ## Validierungsstand
 
-Der Scaffold wurde gegen den Ordner `D:\VAZ_Chaos\Medien` mit drei MXF-Kameras plus Master-WAV erzeugt und per ffmpeg-Parse-Test erfolgreich angenommen.
+Der Scaffold wurde gegen den Ordner `D:\VAZ_Chaos\Medien` mit drei MXF-Kameras plus Master-WAV sowohl fuer einen groben 3-Segment-Plan als auch fuer den signal-aware Plan erzeugt.
+
+Wichtig:
+
+- die JSON- und Filtergraph-Erzeugung funktioniert fuer beide Plaene
+- ein voller ffmpeg-Smoke-Test auf dem signal-aware Plan ist bei langen 4K-H.264-Quellen aktuell teuer
+- fuer Entwicklung sollten deshalb Proxys oder kuerzere Preview-Render bevorzugt werden

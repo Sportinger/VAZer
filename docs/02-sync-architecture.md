@@ -173,11 +173,12 @@ Optional:
 
 - Noch kein piecewise Sync bei harten Recorder-Spruengen.
 - `sync_map` ist jetzt persistierbar, aber noch ohne manuelle Overrides oder Review-Flags.
-- Noch kein automatischer Render-Schritt.
+- Der Sync speist jetzt bereits `analysis_map` und `cut_plan`, aber noch ohne explizite Review-Gates.
+- Noch kein automatischer Render-Lauf, nur ein Render-Scaffold.
 
 ## Naechste technische Schritte
 
 1. Residualfehler je Anchor explizit ausgeben und Grenzwerte haerter machen.
 2. piecewise Sync einfuehren, wenn lineare Drift nicht reicht.
-3. danach den `cut_plan` auf genau dieser Timeline aufbauen.
-4. schliesslich `ffmpeg`-Render aus `sync_map` und spaeterem `cut_plan` erzeugen.
+3. technische Analyse und spaetere semantische Signale enger an Sync-Confidence koppeln.
+4. Proxy- oder Preview-Pfade fuer schnellere QA und Render-Checks bauen.

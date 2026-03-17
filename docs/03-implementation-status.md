@@ -16,6 +16,10 @@ Warum Python fuer diesen Start:
 - `src/vazer/cli.py`: CLI-Einstieg
 - `src/vazer/fftools.py`: `ffprobe`- und `ffmpeg`-Bruecken
 - `src/vazer/sync.py`: Stream-Auswahl, Coarse Sync, Anchor-Fit, Drift-Modell
+- `src/vazer/analysis.py`: speech-like Master-Aktivitaet und technische Kameraanalyse
+- `src/vazer/cut_plan.py`: baseline- und signal-aware Planer
+- `src/vazer/render.py`: ffmpeg-Scaffold aus `cut_plan`
+- `src/vazer/transcript.py`: Loader fuer externe Transcript-Artefakte
 
 ## Bereits funktional
 
@@ -26,7 +30,8 @@ Warum Python fuer diesen Start:
 - mehrere Fine-Sync-Anker messen
 - lineares Zeitmodell `source_time = speed * master_time + offset` fitten
 - mehrere Kamera-Dateien in ein gemeinsames `sync_map.json` schreiben
-- ein baseline `cut_plan.json` aus `sync_map` erzeugen
+- ein `analysis_map.json` aus `sync_map` erzeugen
+- ein baseline oder signal-aware `cut_plan.json` aus `sync_map` erzeugen
 - einen ffmpeg-Render-Scaffold aus `cut_plan` erzeugen
 
 ## Smoke-Test mit den Beispiel-Dateien
@@ -44,10 +49,11 @@ Der aktuelle Sync- und Plan-Lauf liefert plausibel:
 - Modell `source_time = 0.999869857 * master_time - 71.133789`
 - prognostizierte Drift ueber `1h` von ca. `-0.469 s`
 - alle drei MXF-Kameras lassen sich inzwischen in ein gemeinsames `sync_map` bringen
-- der baseline `cut_plan` erzeugt daraus aktuell `3` Video-Segmente ueber `4568.0 s` Output
-- der ffmpeg-Render-Scaffold wurde erfolgreich geparst
+- die technische Analyse erzeugt ein `analysis_map` mit `382` speech-like Master-Segmenten
+- der signal-aware `cut_plan` erzeugt daraus aktuell `306` Video-Segmente ueber `4568.0 s` Output
+- der Render-Scaffold fuer diesen Plan wird sauber erzeugt, ein voller ffmpeg-Smoke-Test ist bei langen 4K-H.264-Quellen aber noch bewusst teuer
 
-Das ist noch kein finaler Produktionswert, aber ein belastbarer erster Kern fuer das `sync_map`.
+Das ist noch kein finaler Produktionswert, aber ein belastbarer erster Kern fuer `sync_map -> analysis_map -> cut_plan -> render scaffold`.
 
 ## Arbeitsweise zum lokalen Test
 
@@ -77,6 +83,20 @@ $env:PYTHONPATH='src'
 python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --out .\artifacts\cut_plan.json
 ```
 
+Technische Analyse:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer analyze technical --sync-map .\artifacts\sync_map.json --out .\artifacts\analysis_map.json
+```
+
+Signal-aware Plan:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --out .\artifacts\cut_plan.json
+```
+
 Render-Scaffold:
 
 ```powershell
@@ -88,5 +108,5 @@ python -m vazer render scaffold --cut-plan .\artifacts\cut_plan.json --output-me
 
 - explizite Fehlerschwellen und Quality-Gates
 - manuelle Overrides und Review-Flags im `sync_map`
-- Transcript- und Analyse-Signale fuer intelligenteren Schnitt
+- Proxy-/Preview-Pipeline fuer schnellere technische Analyse und Render-Checks
 - echtes `render run` statt nur Scaffold

@@ -131,6 +131,201 @@ def _candidate_score(window: CoverageWindow) -> tuple[float, float, float, float
     )
 
 
+def _interval_overlap(start_seconds: float, end_seconds: float, interval_start_seconds: float, interval_end_seconds: float) -> float:
+    return max(0.0, min(end_seconds, interval_end_seconds) - max(start_seconds, interval_start_seconds))
+
+
+def _extract_master_speech_segments(
+    analysis_map: dict[str, Any] | None,
+    transcript_artifact: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+
+    if analysis_map is not None:
+        for segment in analysis_map.get("master_audio_activity", {}).get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            segments.append(
+                {
+                    "start_seconds": float(segment["start_seconds"]),
+                    "end_seconds": float(segment["end_seconds"]),
+                    "source": "analysis",
+                    "text": None,
+                }
+            )
+
+    if transcript_artifact is not None:
+        for segment in transcript_artifact.get("segments", []):
+            if not isinstance(segment, dict):
+                continue
+            segments.append(
+                {
+                    "start_seconds": float(segment["start_seconds"]),
+                    "end_seconds": float(segment["end_seconds"]),
+                    "source": "transcript",
+                    "text": segment.get("text") or None,
+                }
+            )
+
+    segments.sort(key=lambda item: (item["start_seconds"], item["end_seconds"]))
+    return segments
+
+
+def _analysis_windows_by_asset(analysis_map: dict[str, Any] | None) -> dict[str, list[dict[str, Any]]]:
+    if analysis_map is None:
+        return {}
+
+    windows: dict[str, list[dict[str, Any]]] = {}
+    for entry in analysis_map.get("entries", []):
+        if not isinstance(entry, dict) or entry.get("status") != "analyzed":
+            continue
+        asset_id = entry.get("asset_id")
+        if not isinstance(asset_id, str):
+            continue
+        windows[asset_id] = [
+            window
+            for window in entry.get("windows", [])
+            if isinstance(window, dict)
+        ]
+    return windows
+
+
+def _transcript_excerpt(
+    interval_start_seconds: float,
+    interval_end_seconds: float,
+    transcript_artifact: dict[str, Any] | None,
+) -> tuple[int, str | None]:
+    if transcript_artifact is None:
+        return 0, None
+
+    overlapping_segments = [
+        segment
+        for segment in transcript_artifact.get("segments", [])
+        if isinstance(segment, dict)
+        and _interval_overlap(
+            interval_start_seconds,
+            interval_end_seconds,
+            float(segment["start_seconds"]),
+            float(segment["end_seconds"]),
+        )
+        > EPSILON
+    ]
+    if not overlapping_segments:
+        return 0, None
+
+    combined_text = " ".join(
+        str(segment.get("text") or "").strip()
+        for segment in overlapping_segments[:2]
+        if str(segment.get("text") or "").strip()
+    ).strip()
+    if len(combined_text) > 120:
+        combined_text = combined_text[:117].rstrip() + "..."
+
+    return len(overlapping_segments), combined_text or None
+
+
+def _speech_overlap_summary(
+    interval_start_seconds: float,
+    interval_end_seconds: float,
+    speech_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    total_overlap_seconds = 0.0
+    sources: set[str] = set()
+
+    for segment in speech_segments:
+        overlap_seconds = _interval_overlap(
+            interval_start_seconds,
+            interval_end_seconds,
+            segment["start_seconds"],
+            segment["end_seconds"],
+        )
+        if overlap_seconds <= EPSILON:
+            continue
+        total_overlap_seconds += overlap_seconds
+        sources.add(segment["source"])
+
+    duration_seconds = interval_end_seconds - interval_start_seconds
+    ratio = 0.0 if duration_seconds <= EPSILON else total_overlap_seconds / duration_seconds
+    return {
+        "speech_like": ratio >= 0.25,
+        "speech_overlap_ratio": float(ratio),
+        "speech_sources": sorted(sources),
+    }
+
+
+def _analysis_signal_summary(
+    asset_id: str,
+    interval_start_seconds: float,
+    interval_end_seconds: float,
+    windows_by_asset: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    windows = windows_by_asset.get(asset_id, [])
+    total_weight = 0.0
+    usable_sum = 0.0
+    sharpness_sum = 0.0
+    stability_sum = 0.0
+
+    for window in windows:
+        overlap_seconds = _interval_overlap(
+            interval_start_seconds,
+            interval_end_seconds,
+            float(window["master_start_seconds"]),
+            float(window["master_end_seconds"]),
+        )
+        if overlap_seconds <= EPSILON:
+            continue
+
+        total_weight += overlap_seconds
+        usable_sum += overlap_seconds * float(window["usable_score"])
+        sharpness_sum += overlap_seconds * float(window["sharpness_score"])
+        stability_sum += overlap_seconds * float(window["stability_score"])
+
+    if total_weight <= EPSILON:
+        return {
+            "has_analysis": False,
+            "usable_score": 0.5,
+            "sharpness_score": 0.5,
+            "stability_score": 0.5,
+        }
+
+    return {
+        "has_analysis": True,
+        "usable_score": float(usable_sum / total_weight),
+        "sharpness_score": float(sharpness_sum / total_weight),
+        "stability_score": float(stability_sum / total_weight),
+    }
+
+
+def _selection_score(
+    window: CoverageWindow,
+    signal_summary: dict[str, Any],
+    speech_summary: dict[str, Any],
+    previous_asset_id: str | None,
+) -> tuple[float, ...]:
+    continuity_bonus = 1.0 if previous_asset_id == window.asset_id else 0.0
+    if speech_summary["speech_like"]:
+        return (
+            float(signal_summary["usable_score"]),
+            float(signal_summary["stability_score"]),
+            float(signal_summary["sharpness_score"]),
+            float(_confidence_rank(window.confidence)),
+            float(window.accepted_anchor_count),
+            continuity_bonus,
+            float(window.coarse_peak_ratio),
+            -float(window.predicted_drift_over_hour_seconds),
+        )
+
+    return (
+        float(_confidence_rank(window.confidence)),
+        float(window.accepted_anchor_count),
+        continuity_bonus,
+        float(signal_summary["usable_score"]),
+        float(signal_summary["sharpness_score"]),
+        float(window.coarse_peak_ratio),
+        -float(window.predicted_drift_over_hour_seconds),
+    )
+
+
 def _merge_video_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not segments:
         return []
@@ -165,6 +360,10 @@ def build_baseline_cut_plan(
     sync_map: dict[str, Any],
     *,
     source_sync_map_path: str | None = None,
+    analysis_map: dict[str, Any] | None = None,
+    source_analysis_path: str | None = None,
+    transcript_artifact: dict[str, Any] | None = None,
+    source_transcript_path: str | None = None,
 ) -> dict[str, Any]:
     if sync_map.get("schema_version") != "vazer.sync_map.v1":
         raise ValueError("Unsupported sync_map schema version.")
@@ -202,10 +401,20 @@ def build_baseline_cut_plan(
         round(coverage.overlap_end_seconds, 6)
         for coverage in coverage_windows
     }
+    speech_segments = _extract_master_speech_segments(analysis_map, transcript_artifact)
+    windows_by_asset = _analysis_windows_by_asset(analysis_map)
+    for segment in speech_segments:
+        boundary_candidates.add(round(float(segment["start_seconds"]), 6))
+        boundary_candidates.add(round(float(segment["end_seconds"]), 6))
+    for windows in windows_by_asset.values():
+        for window in windows:
+            boundary_candidates.add(round(float(window["master_start_seconds"]), 6))
+            boundary_candidates.add(round(float(window["master_end_seconds"]), 6))
     boundaries = sorted(boundary_candidates)
 
     initial_segments: list[dict[str, Any]] = []
     output_cursor = 0.0
+    previous_asset_id: str | None = None
     for master_start_seconds, master_end_seconds in zip(boundaries[:-1], boundaries[1:], strict=False):
         duration_seconds = master_end_seconds - master_start_seconds
         if duration_seconds <= EPSILON:
@@ -220,17 +429,51 @@ def build_baseline_cut_plan(
         if not active_coverages:
             continue
 
-        selected = max(active_coverages, key=_candidate_score)
+        speech_summary = _speech_overlap_summary(master_start_seconds, master_end_seconds, speech_segments)
+        transcript_overlap_count, transcript_excerpt = _transcript_excerpt(
+            master_start_seconds,
+            master_end_seconds,
+            transcript_artifact,
+        )
+
+        candidate_bundle = []
+        for coverage in active_coverages:
+            signal_summary = _analysis_signal_summary(
+                coverage.asset_id,
+                master_start_seconds,
+                master_end_seconds,
+                windows_by_asset,
+            )
+            candidate_bundle.append(
+                (
+                    coverage,
+                    signal_summary,
+                    _selection_score(coverage, signal_summary, speech_summary, previous_asset_id),
+                )
+            )
+
+        selected, selected_signal_summary, _score = max(candidate_bundle, key=lambda item: item[2])
         source_start_seconds = selected.speed * master_start_seconds + selected.offset_seconds
         source_end_seconds = selected.speed * master_end_seconds + selected.offset_seconds
         source_start_seconds = max(0.0, source_start_seconds)
         source_end_seconds = min(selected.duration_seconds, source_end_seconds)
 
+        if speech_summary["speech_like"] and selected_signal_summary["has_analysis"]:
+            reason = "Preferred more stable/sharp camera during speech-like interval."
+        elif speech_summary["speech_like"]:
+            reason = "Preferred highest-confidence synced camera during speech-like interval."
+        elif len(active_coverages) == 1:
+            reason = "Only synced camera covering interval."
+        elif selected_signal_summary["has_analysis"]:
+            reason = "Best available camera by sync confidence and technical quality."
+        else:
+            reason = "Highest-confidence synced camera covering interval."
+
         initial_segments.append(
             {
                 "id": "video_0000",
                 "type": "camera",
-                "strategy": "baseline_best_available",
+                "strategy": "signal_aware_best_available" if (analysis_map or transcript_artifact) else "baseline_best_available",
                 "asset_id": selected.asset_id,
                 "asset_path": selected.asset_path,
                 "confidence": selected.confidence,
@@ -242,14 +485,20 @@ def build_baseline_cut_plan(
                 "source_start_seconds": source_start_seconds,
                 "source_end_seconds": source_end_seconds,
                 "speed": selected.speed,
-                "reason": (
-                    "Only synced camera covering interval."
-                    if len(active_coverages) == 1
-                    else "Highest-confidence synced camera covering interval."
-                ),
+                "reason": reason,
+                "signals": {
+                    **speech_summary,
+                    "transcript_overlap_count": transcript_overlap_count,
+                    "transcript_excerpt": transcript_excerpt,
+                    "usable_score": selected_signal_summary["usable_score"],
+                    "sharpness_score": selected_signal_summary["sharpness_score"],
+                    "stability_score": selected_signal_summary["stability_score"],
+                    "has_analysis": selected_signal_summary["has_analysis"],
+                },
             }
         )
         output_cursor += duration_seconds
+        previous_asset_id = selected.asset_id
 
     video_segments = _merge_video_segments(initial_segments)
     if not video_segments:
@@ -304,6 +553,18 @@ def build_baseline_cut_plan(
             "schema_version": sync_map["schema_version"],
             "path": source_sync_map_path,
         },
+        "source_analysis_map": None
+        if analysis_map is None
+        else {
+            "schema_version": analysis_map["schema_version"],
+            "path": source_analysis_path,
+        },
+        "source_transcript": None
+        if transcript_artifact is None
+        else {
+            "schema_version": transcript_artifact["source"]["schema_version"],
+            "path": source_transcript_path,
+        },
         "master_audio": {
             "path": master_path,
             "duration_seconds": master_duration_seconds,
@@ -325,5 +586,7 @@ def build_baseline_cut_plan(
             "synced_assets": len(synced_entries),
             "video_segments": len(video_segments),
             "output_duration_seconds": video_segments[-1]["output_end_seconds"],
+            "signal_aware": analysis_map is not None or transcript_artifact is not None,
+            "speech_segment_count": len(speech_segments),
         },
     }
