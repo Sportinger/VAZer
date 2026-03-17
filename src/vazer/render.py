@@ -110,7 +110,7 @@ def build_render_scaffold(
         command.extend(["-i", path])
     command.extend(
         [
-            "-/filter_complex",
+            "-filter_complex_script",
             str(filtergraph_path),
             "-map",
             "[vout]",
