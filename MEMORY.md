@@ -1,0 +1,8 @@
+# Project Memory
+
+## Arbeitsregeln
+
+- Nach jeder abgeschlossenen Aenderung werden die betroffenen Feature-Docs in `docs/` aktualisiert.
+- Nach jeder abgeschlossenen Aenderung wird ein Git-Commit erstellt.
+- Nach jedem Commit wird automatisch gepusht, sobald ein Git-Remote konfiguriert ist und der Push technisch moeglich ist.
+- Wenn kein Remote konfiguriert ist oder ein Push scheitert, wird das im Abschluss klar benannt.
