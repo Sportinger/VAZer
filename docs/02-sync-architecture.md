@@ -75,26 +75,45 @@ Warum diese Einschraenkung bewusst ist:
 
 #### broad_cluster
 
-Falls `bounded_direct` scheitert:
+Zusatzpfad fuer schwere Faelle:
 
 - mehrere Probe-Fenster derselben Kamera werden gegen die ganze Masterspur gesucht
 - die resultierenden Startkandidaten werden geclustert
-- der stabilste Cluster gewinnt
+- die staerksten Cluster werden als weitere Kandidaten behalten
 
 Das ist wichtig fuer Kameras, die deutlich vor oder nach der Masterspur anlaufen und mit der bounded-Suche durch das Raster fallen.
 
 ### 4. Fine Sync und Drift
 
-Nach dem Grob-Offset werden mehrere Anchor-Fenster ueber die gemeinsame Ueberlappung verteilt.
+Nach der Grobsuche wird nicht mehr nur ein Kandidat blind uebernommen.
+
+Aktueller Rescue-Pfad:
+
+- mehrere coarse Kandidaten sammeln
+- jeden Kandidaten mit Fine-Anchors gegenpruefen
+- den Kandidaten mit der besten Anchor-Konsistenz waehlen
+
+Die Anchor-Fenster werden dabei nicht mehr nur gleichmaessig verteilt, sondern bevorzugt auf aktive Master-Audio-Bereiche gelegt.
 
 Pro Anchor:
 
 - Master-Fenster decodieren
 - Kamera-Fenster um die erwartete Stelle decodieren
-- Korrelation im engen Suchradius
+- hybride Korrelation im engen Suchradius
 - `source_minus_master` messen
 
 Aus den akzeptierten Anchors wird eine Gerade gefittet.
+
+## Robuste Features
+
+Der Sync nutzt inzwischen nicht mehr nur rohe Waveform-Korrelation.
+
+Aktuell kommen zusammen:
+
+- bandbegrenztes Mono-Audio
+- Z-Score-Normalisierung der Fenster
+- GCC-PHAT-Anteil fuer robustere Lag-Schaetzung
+- Energie-/Onset-Huellkurven fuer zusaetzliche coarse Kandidaten und bessere Anchor-Auswahl
 
 ## Datenobjekte
 
@@ -195,7 +214,7 @@ Das Ziel ist simpel:
 
 ## Naechste technische Schritte
 
-1. Residualfehler je Anchor explizit ausgeben und Grenzwerte haerter machen.
-2. piecewise Sync einfuehren, wenn lineare Drift nicht reicht.
-3. technische Analyse und spaetere semantische Signale enger an Sync-Confidence koppeln.
-4. Proxy- oder Preview-Pfade fuer schnellere QA und Render-Checks bauen.
+1. piecewise Sync einfuehren, wenn lineare Drift nicht reicht.
+2. technische Analyse und spaetere semantische Signale enger an Sync-Confidence koppeln.
+3. Proxy- oder Preview-Pfade fuer schnellere QA und Render-Checks bauen.
+4. spaeter visuelle Gegenpruefung fuer Lip-Sync oder Ereignis-Sync ergaenzen.

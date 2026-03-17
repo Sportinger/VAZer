@@ -25,6 +25,9 @@ class SyncOptions:
     anchor_count: int = 6
     anchor_window_seconds: float = 45.0
     anchor_search_seconds: float = 1.5
+    coarse_candidate_limit: int = 6
+    anchor_activity_step_seconds: float = 10.0
+    anchor_min_spacing_seconds: float = 30.0
 
 
 @dataclass(slots=True)
@@ -107,6 +110,17 @@ class SyncProbeReport:
     summary: SyncSummary
 
 
+@dataclass(slots=True)
+class CandidateEvaluation:
+    coarse: CoarseSyncMeasurement
+    anchors: list[AnchorMeasurement]
+    accepted_anchors: list[AnchorMeasurement]
+    mapping: SyncMapping
+    confidence: str
+    diagnostics: dict[str, float | int | None]
+    errors: list[str]
+
+
 def _analysis_filters() -> list[str]:
     return ["highpass=f=100", "lowpass=f=1800"]
 
@@ -157,6 +171,52 @@ def _cross_correlate(left: np.ndarray, right: np.ndarray) -> np.ndarray:
         fft_size,
     )
     return correlation[:output_length]
+
+
+def _cross_correlate_gcc_phat(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    output_length = left.size + right.size - 1
+    fft_size = 1 << (output_length - 1).bit_length()
+    left_fft = np.fft.rfft(left, fft_size)
+    right_fft = np.fft.rfft(right, fft_size)
+    cross_power = left_fft * np.conj(right_fft)
+    cross_power /= np.maximum(np.abs(cross_power), 1e-12)
+    circular = np.fft.irfft(cross_power, fft_size)
+    tail = circular[-(right.size - 1) :] if right.size > 1 else np.empty(0, dtype=np.float64)
+    head = circular[: left.size]
+    correlation = np.concatenate((tail, head))
+    return correlation[:output_length]
+
+
+def _build_energy_envelope(
+    samples: np.ndarray,
+    sample_rate: int,
+    envelope_bin_seconds: float,
+) -> tuple[np.ndarray, float]:
+    if samples.size == 0:
+        return samples.astype(np.float64), float(sample_rate)
+
+    bin_size = max(1, round(sample_rate * envelope_bin_seconds))
+    usable_length = max(bin_size, samples.size // bin_size * bin_size)
+    padded = samples[:usable_length]
+    if padded.size < bin_size:
+        padded = np.pad(padded, (0, bin_size - padded.size))
+
+    frames = padded.reshape(-1, bin_size).astype(np.float64)
+    rms = np.sqrt(np.mean(np.square(frames), axis=1))
+    onset = np.abs(np.diff(rms, prepend=rms[0]))
+    envelope = 0.7 * _normalize_series(rms) + 0.3 * _normalize_series(onset)
+    return envelope.astype(np.float64), float(sample_rate / bin_size)
+
+
+def _hybrid_correlation(
+    left: np.ndarray,
+    right: np.ndarray,
+) -> np.ndarray:
+    normalized_left = _normalize_series(left)
+    normalized_right = _normalize_series(right)
+    raw = _normalize_series(_cross_correlate(normalized_left, normalized_right))
+    phat = _normalize_series(_cross_correlate_gcc_phat(normalized_left, normalized_right))
+    return 0.45 * raw + 0.55 * phat
 
 
 def _find_correlation_peak(
@@ -331,15 +391,43 @@ def _inspect_camera_streams(media: MediaInfo, options: SyncOptions) -> list[Stre
     return [inspection for inspection, _window in contexts]
 
 
-def _measure_coarse_offset(
+def _coarse_candidate_sort_key(candidate: CoarseSyncMeasurement) -> tuple[float, float]:
+    return (
+        float(candidate.peak_ratio or 0.0),
+        float(candidate.peak),
+    )
+
+
+def _dedupe_coarse_candidates(
+    candidates: list[CoarseSyncMeasurement],
+    *,
+    tolerance_seconds: float,
+    limit: int,
+) -> list[CoarseSyncMeasurement]:
+    ordered = sorted(candidates, key=_coarse_candidate_sort_key, reverse=True)
+    unique: list[CoarseSyncMeasurement] = []
+    for candidate in ordered:
+        if any(
+            abs(candidate.camera_starts_at_master_seconds - existing.camera_starts_at_master_seconds)
+            <= tolerance_seconds
+            for existing in unique
+        ):
+            continue
+        unique.append(candidate)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _generate_coarse_candidates(
     master_path: str,
     master_duration_seconds: float,
     camera_path: str,
     camera_duration_seconds: float,
     stream: StreamInspection,
     options: SyncOptions,
-) -> CoarseSyncMeasurement:
-    def bounded_search() -> tuple[float, float, float | None, float | None] | None:
+) -> list[CoarseSyncMeasurement]:
+    def bounded_search() -> list[CoarseSyncMeasurement]:
         probe_seconds = min(300.0, camera_duration_seconds)
         search_max_seconds = max(0.0, master_duration_seconds - camera_duration_seconds + ALLOWED_MASTER_END_OVERHANG_SECONDS)
         probe_starts = sorted(
@@ -349,7 +437,7 @@ def _measure_coarse_offset(
             }
         )
 
-        best_candidate: tuple[float, float, float | None, float | None] | None = None
+        bounded_candidates: list[CoarseSyncMeasurement] = []
         for probe_start_seconds in probe_starts:
             master_excerpt_duration = min(
                 master_duration_seconds,
@@ -373,28 +461,64 @@ def _measure_coarse_offset(
             if master_excerpt.size == 0 or camera_excerpt.size == 0:
                 continue
 
-            correlation = _cross_correlate(_normalize_series(master_excerpt), _normalize_series(camera_excerpt))
-            lag_samples, peak, second_peak, peak_ratio = _find_correlation_peak(
-                correlation,
+            lag_min_samples = round(probe_start_seconds * options.coarse_rate)
+            lag_max_samples = round((probe_start_seconds + search_max_seconds) * options.coarse_rate)
+            waveform_candidates = _top_correlation_candidates(
+                _hybrid_correlation(master_excerpt, camera_excerpt),
                 camera_excerpt.size,
-                round(probe_start_seconds * options.coarse_rate),
-                round((probe_start_seconds + search_max_seconds) * options.coarse_rate),
+                lag_min_samples,
+                lag_max_samples,
                 max(1, round(options.coarse_rate)),
+                options.coarse_candidate_limit,
+            )
+            envelope_master, envelope_rate = _build_energy_envelope(
+                master_excerpt,
+                options.coarse_rate,
+                options.envelope_bin_seconds,
+            )
+            envelope_camera, _camera_envelope_rate = _build_energy_envelope(
+                camera_excerpt,
+                options.coarse_rate,
+                options.envelope_bin_seconds,
+            )
+            envelope_candidates = _top_correlation_candidates(
+                _cross_correlate(_normalize_series(envelope_master), _normalize_series(envelope_camera)),
+                envelope_camera.size,
+                round(probe_start_seconds * envelope_rate),
+                round((probe_start_seconds + search_max_seconds) * envelope_rate),
+                max(1, round(envelope_rate)),
+                max(2, options.coarse_candidate_limit // 2),
             )
 
-            camera_start_seconds = lag_samples / options.coarse_rate - probe_start_seconds
-            if camera_start_seconds < -1.0:
-                continue
-            if camera_start_seconds + camera_duration_seconds > master_duration_seconds + ALLOWED_MASTER_END_OVERHANG_SECONDS:
-                continue
+            for method_name, candidate_pack, sample_rate in (
+                ("bounded_direct", waveform_candidates, float(options.coarse_rate)),
+                ("bounded_direct_envelope", envelope_candidates, float(envelope_rate)),
+            ):
+                for lag_samples, peak, second_peak, peak_ratio in candidate_pack:
+                    camera_start_seconds = lag_samples / sample_rate - probe_start_seconds
+                    if camera_start_seconds < -1.0:
+                        continue
+                    if camera_start_seconds + camera_duration_seconds > master_duration_seconds + ALLOWED_MASTER_END_OVERHANG_SECONDS:
+                        continue
+                    bounded_candidates.append(
+                        CoarseSyncMeasurement(
+                            map_specifier=stream.map_specifier,
+                            method=method_name,
+                            camera_starts_at_master_seconds=float(camera_start_seconds),
+                            master_to_source_offset_seconds=float(-camera_start_seconds),
+                            peak=float(peak),
+                            second_peak=None if second_peak is None else float(second_peak),
+                            peak_ratio=None if peak_ratio is None else float(peak_ratio),
+                        )
+                    )
 
-            candidate = (camera_start_seconds, peak, second_peak, peak_ratio)
-            if best_candidate is None or (peak_ratio or 0.0) > (best_candidate[3] or 0.0):
-                best_candidate = candidate
+        return _dedupe_coarse_candidates(
+            bounded_candidates,
+            tolerance_seconds=2.0,
+            limit=options.coarse_candidate_limit,
+        )
 
-        return best_candidate
-
-    def broad_cluster_search() -> tuple[float, float, float | None, float | None] | None:
+    def broad_cluster_search() -> list[CoarseSyncMeasurement]:
         probe_seconds = min(180.0, camera_duration_seconds)
         max_start = max(camera_duration_seconds - probe_seconds, 0.0)
         probe_starts = sorted(
@@ -413,8 +537,7 @@ def _measure_coarse_offset(
             filters=_analysis_filters(),
         )
         if master_reference.size == 0:
-            return None
-        master_reference = _normalize_series(master_reference)
+            return []
 
         clusters: list[dict[str, Any]] = []
         min_overlap_seconds = max(options.anchor_window_seconds * 2, 120.0)
@@ -430,14 +553,14 @@ def _measure_coarse_offset(
             if camera_excerpt.size == 0:
                 continue
 
-            correlation = _cross_correlate(master_reference, _normalize_series(camera_excerpt))
+            correlation = _hybrid_correlation(master_reference, camera_excerpt)
             candidates = _top_correlation_candidates(
                 correlation,
                 camera_excerpt.size,
                 0,
                 master_reference.size - 1,
                 max(1, round(options.coarse_rate)),
-                6,
+                options.coarse_candidate_limit,
             )
 
             for lag_samples, peak, second_peak, peak_ratio in candidates:
@@ -478,37 +601,58 @@ def _measure_coarse_offset(
                         cluster["best_peak_ratio"] = peak_ratio
 
         if not clusters:
-            return None
+            return []
 
-        best_cluster = max(
+        ordered_clusters = sorted(
             clusters,
             key=lambda item: (len(item["probe_indices"]), item["score_sum"], item["best_peak_ratio"] or 0.0),
+            reverse=True,
         )
-        return (
-            float(best_cluster["camera_start_seconds"]),
-            float(best_cluster["best_peak"]),
-            None if best_cluster["best_second_peak"] is None else float(best_cluster["best_second_peak"]),
-            None if best_cluster["best_peak_ratio"] is None else float(best_cluster["best_peak_ratio"]),
+        return _dedupe_coarse_candidates(
+            [
+                CoarseSyncMeasurement(
+                    map_specifier=stream.map_specifier,
+                    method="broad_cluster",
+                    camera_starts_at_master_seconds=float(cluster["camera_start_seconds"]),
+                    master_to_source_offset_seconds=float(-cluster["camera_start_seconds"]),
+                    peak=float(cluster["best_peak"]),
+                    second_peak=None if cluster["best_second_peak"] is None else float(cluster["best_second_peak"]),
+                    peak_ratio=None if cluster["best_peak_ratio"] is None else float(cluster["best_peak_ratio"]),
+                )
+                for cluster in ordered_clusters
+            ],
+            tolerance_seconds=2.0,
+            limit=options.coarse_candidate_limit,
         )
 
-    best_candidate = bounded_search()
-    method = "bounded_direct"
-    if best_candidate is None:
-        best_candidate = broad_cluster_search()
-        method = "broad_cluster"
-
-    if best_candidate is None:
-        raise ValueError(f"Unable to derive a coarse sync candidate for stream {stream.map_specifier}.")
-
-    return CoarseSyncMeasurement(
-        map_specifier=stream.map_specifier,
-        method=method,
-        camera_starts_at_master_seconds=float(best_candidate[0]),
-        master_to_source_offset_seconds=float(-best_candidate[0]),
-        peak=float(best_candidate[1]),
-        second_peak=None if best_candidate[2] is None else float(best_candidate[2]),
-        peak_ratio=None if best_candidate[3] is None else float(best_candidate[3]),
+    candidates = bounded_search()
+    candidates.extend(broad_cluster_search())
+    candidates = _dedupe_coarse_candidates(
+        candidates,
+        tolerance_seconds=2.0,
+        limit=options.coarse_candidate_limit,
     )
+    if not candidates:
+        raise ValueError(f"Unable to derive a coarse sync candidate for stream {stream.map_specifier}.")
+    return candidates
+
+
+def _measure_coarse_offset(
+    master_path: str,
+    master_duration_seconds: float,
+    camera_path: str,
+    camera_duration_seconds: float,
+    stream: StreamInspection,
+    options: SyncOptions,
+) -> CoarseSyncMeasurement:
+    return _generate_coarse_candidates(
+        master_path,
+        master_duration_seconds,
+        camera_path,
+        camera_duration_seconds,
+        stream,
+        options,
+    )[0]
 
 
 def _linspace(count: int, start: float, end: float) -> list[float]:
@@ -517,7 +661,7 @@ def _linspace(count: int, start: float, end: float) -> list[float]:
     return [float(value) for value in np.linspace(start, end, num=count)]
 
 
-def _build_anchor_reference_times(
+def _fallback_anchor_reference_times(
     overlap_start_seconds: float,
     overlap_end_seconds: float,
     window_seconds: float,
@@ -532,12 +676,79 @@ def _build_anchor_reference_times(
     return _linspace(anchor_count, usable_start, usable_end)
 
 
+def _build_anchor_reference_times(
+    master_activity_samples: np.ndarray | None,
+    activity_rate: int,
+    overlap_start_seconds: float,
+    overlap_end_seconds: float,
+    window_seconds: float,
+    anchor_count: int,
+    options: SyncOptions,
+) -> list[float]:
+    fallback = _fallback_anchor_reference_times(
+        overlap_start_seconds,
+        overlap_end_seconds,
+        window_seconds,
+        anchor_count,
+    )
+    if master_activity_samples is None or master_activity_samples.size == 0:
+        return fallback
+
+    usable_start = overlap_start_seconds + window_seconds / 2
+    usable_end = overlap_end_seconds - window_seconds / 2
+    if usable_end <= usable_start:
+        return fallback
+
+    step_seconds = max(2.0, options.anchor_activity_step_seconds)
+    min_spacing_seconds = max(options.anchor_min_spacing_seconds, window_seconds * 0.5)
+    window_sample_count = max(1, round(window_seconds * activity_rate))
+    step_sample_count = max(1, round(step_seconds * activity_rate))
+
+    candidates: list[tuple[float, float]] = []
+    start_index = round(usable_start * activity_rate)
+    end_index = round(usable_end * activity_rate)
+    for center_index in range(start_index, end_index + 1, step_sample_count):
+        window_start_index = max(0, center_index - window_sample_count // 2)
+        window_end_index = min(master_activity_samples.size, window_start_index + window_sample_count)
+        segment = master_activity_samples[window_start_index:window_end_index]
+        if segment.size < max(32, window_sample_count // 4):
+            continue
+
+        energy = _rms(segment)
+        onset = float(np.mean(np.abs(np.diff(segment.astype(np.float64))))) if segment.size > 1 else 0.0
+        center_seconds = center_index / activity_rate
+        candidates.append((energy + 0.8 * onset, center_seconds))
+
+    if not candidates:
+        return fallback
+
+    selected: list[float] = []
+    for _score, center_seconds in sorted(candidates, key=lambda item: item[0], reverse=True):
+        if any(abs(center_seconds - existing) < min_spacing_seconds for existing in selected):
+            continue
+        selected.append(center_seconds)
+        if len(selected) >= anchor_count:
+            break
+
+    if len(selected) < anchor_count:
+        for center_seconds in fallback:
+            if any(abs(center_seconds - existing) < min_spacing_seconds * 0.5 for existing in selected):
+                continue
+            selected.append(center_seconds)
+            if len(selected) >= anchor_count:
+                break
+
+    return sorted(selected[:anchor_count]) if selected else fallback
+
+
 def _refine_anchors(
     master: MediaInfo,
     camera: MediaInfo,
     stream: StreamInspection,
     coarse: CoarseSyncMeasurement,
     options: SyncOptions,
+    *,
+    master_activity_samples: np.ndarray | None = None,
 ) -> list[AnchorMeasurement]:
     master_duration = _require_duration(master, "Master")
     camera_duration = _require_duration(camera, "Camera")
@@ -549,10 +760,13 @@ def _refine_anchors(
 
     measurements: list[AnchorMeasurement] = []
     for reference_seconds in _build_anchor_reference_times(
+        master_activity_samples,
+        options.activity_rate,
         overlap_start,
         overlap_end,
         options.anchor_window_seconds,
         options.anchor_count,
+        options,
     ):
         master_window_start = max(0.0, reference_seconds - options.anchor_window_seconds / 2)
         expected_source_start = master_window_start - coarse.camera_starts_at_master_seconds
@@ -578,7 +792,7 @@ def _refine_anchors(
         if master_window.size == 0 or camera_window.size == 0:
             continue
 
-        correlation = _cross_correlate(_normalize_series(master_window), _normalize_series(camera_window))
+        correlation = _hybrid_correlation(master_window, camera_window)
         lag_samples, peak, second_peak, peak_ratio = _find_correlation_peak(
             correlation,
             camera_window.size,
@@ -711,6 +925,79 @@ def _validate_sync_diagnostics(diagnostics: dict[str, float | int | None]) -> li
     return errors
 
 
+def _evaluate_candidate(
+    master: MediaInfo,
+    camera: MediaInfo,
+    stream: StreamInspection,
+    coarse: CoarseSyncMeasurement,
+    options: SyncOptions,
+    *,
+    master_activity_samples: np.ndarray | None = None,
+) -> CandidateEvaluation:
+    anchors = _refine_anchors(
+        master,
+        camera,
+        stream,
+        coarse,
+        options,
+        master_activity_samples=master_activity_samples,
+    )
+    accepted_anchors = [anchor for anchor in anchors if anchor.accepted]
+    fit_source = accepted_anchors or anchors
+
+    slope, intercept = _fit_weighted_line(
+        [
+            (anchor.master_reference_seconds, anchor.source_minus_master_seconds, anchor.peak_ratio or 1.0)
+            for anchor in fit_source
+        ]
+    )
+
+    speed = 1.0 + slope
+    offset_seconds = intercept
+    mapping = SyncMapping(
+        speed=float(speed),
+        offset_seconds=float(offset_seconds),
+        camera_starts_at_master_seconds=float(-offset_seconds / speed),
+        predicted_drift_over_hour_seconds=float(slope * 3600.0),
+        model="source_time = speed * master_time + offset_seconds",
+    )
+    confidence = _summarize_confidence(anchors, mapping.predicted_drift_over_hour_seconds)
+    diagnostics = _calculate_sync_diagnostics(
+        anchors,
+        fit_source,
+        coarse.peak_ratio,
+        mapping.speed,
+        mapping.offset_seconds,
+    )
+    errors = _validate_sync_diagnostics(diagnostics)
+    return CandidateEvaluation(
+        coarse=coarse,
+        anchors=anchors,
+        accepted_anchors=accepted_anchors,
+        mapping=mapping,
+        confidence=confidence,
+        diagnostics=diagnostics,
+        errors=errors,
+    )
+
+
+def _candidate_evaluation_sort_key(candidate: CandidateEvaluation) -> tuple[float, ...]:
+    diagnostics = candidate.diagnostics
+    residual_rmse_seconds = diagnostics["residual_rmse_seconds"]
+    residual_max_abs_seconds = diagnostics["residual_max_abs_seconds"]
+    accepted_offset_range_seconds = diagnostics["accepted_offset_range_seconds"]
+    return (
+        1.0 if not candidate.errors else 0.0,
+        float(diagnostics["accepted_anchor_count"] or 0),
+        -float(residual_rmse_seconds) if residual_rmse_seconds is not None else -999.0,
+        -float(residual_max_abs_seconds) if residual_max_abs_seconds is not None else -999.0,
+        -float(accepted_offset_range_seconds) if accepted_offset_range_seconds is not None else -999.0,
+        float(diagnostics["mean_accepted_peak_ratio"] or 0.0),
+        float(candidate.coarse.peak_ratio or 0.0),
+        -abs(candidate.mapping.predicted_drift_over_hour_seconds),
+    )
+
+
 def _resolve_requested_stream(requested_stream: str, streams: list[StreamInspection]) -> list[StreamInspection]:
     matches = [
         stream
@@ -747,10 +1034,18 @@ def analyze_sync(
     if not eligible_streams:
         raise ValueError("No active camera audio stream was found for sync.")
 
+    master_activity_samples = decode_audio(
+        master.path,
+        sample_rate=options.activity_rate,
+        filters=_analysis_filters(),
+    )
+
     best_stream: StreamInspection | None = None
-    best_coarse: CoarseSyncMeasurement | None = None
+    best_candidate: CandidateEvaluation | None = None
+    candidate_count_evaluated = 0
+    validated_candidate_count = 0
     for stream in eligible_streams:
-        coarse = _measure_coarse_offset(
+        coarse_candidates = _generate_coarse_candidates(
             master.path,
             master_duration,
             camera.path,
@@ -758,42 +1053,39 @@ def analyze_sync(
             stream,
             options,
         )
-        if best_coarse is None or (coarse.peak_ratio or 0.0) > (best_coarse.peak_ratio or 0.0):
-            best_stream = stream
-            best_coarse = coarse
+        for coarse_candidate in coarse_candidates:
+            candidate = _evaluate_candidate(
+                master,
+                camera,
+                stream,
+                coarse_candidate,
+                options,
+                master_activity_samples=master_activity_samples,
+            )
+            candidate_count_evaluated += 1
+            if not candidate.errors:
+                validated_candidate_count += 1
+            if best_candidate is None or _candidate_evaluation_sort_key(candidate) > _candidate_evaluation_sort_key(best_candidate):
+                best_stream = stream
+                best_candidate = candidate
 
-    if best_stream is None or best_coarse is None:
+    if best_stream is None or best_candidate is None:
         raise ValueError("Unable to compute a coarse sync offset.")
-
-    anchors = _refine_anchors(master, camera, best_stream, best_coarse, options)
-    accepted_anchors = [anchor for anchor in anchors if anchor.accepted]
-    fit_source = accepted_anchors or anchors
-
-    slope, intercept = _fit_weighted_line(
-        [
-            (anchor.master_reference_seconds, anchor.source_minus_master_seconds, anchor.peak_ratio or 1.0)
-            for anchor in fit_source
-        ]
-    )
-
-    speed = 1.0 + slope
-    offset_seconds = intercept
-    camera_starts_at_master_seconds = -offset_seconds / speed
-    predicted_drift_over_hour_seconds = slope * 3600.0
-    confidence = _summarize_confidence(anchors, predicted_drift_over_hour_seconds)
-    diagnostics = _calculate_sync_diagnostics(
-        anchors,
-        fit_source,
-        best_coarse.peak_ratio,
-        speed,
-        offset_seconds,
-    )
-    errors = _validate_sync_diagnostics(diagnostics)
+    best_coarse = best_candidate.coarse
+    anchors = best_candidate.anchors
+    accepted_anchors = best_candidate.accepted_anchors
+    mapping = best_candidate.mapping
+    confidence = best_candidate.confidence
+    diagnostics = dict(best_candidate.diagnostics)
+    diagnostics["candidate_count_evaluated"] = candidate_count_evaluated
+    diagnostics["validated_candidate_count"] = validated_candidate_count
+    errors = list(best_candidate.errors)
 
     notes = [
         "Master audio is the canonical project timeline.",
         "Camera audio is used only for sync and should not be treated as the final mix.",
         f"Selected stream {best_stream.map_specifier} from {len(camera.audio_streams)} available camera audio streams.",
+        f"Evaluated {candidate_count_evaluated} coarse candidate mappings and selected {best_coarse.method}.",
     ]
     if any(stream.duplicate_of for stream in inspected_streams):
         notes.append("Duplicate scratch tracks were detected and ignored for auto-selection.")
@@ -816,13 +1108,7 @@ def analyze_sync(
             "measurements": anchors,
             "accepted": accepted_anchors,
         },
-        mapping=SyncMapping(
-            speed=float(speed),
-            offset_seconds=float(offset_seconds),
-            camera_starts_at_master_seconds=float(camera_starts_at_master_seconds),
-            predicted_drift_over_hour_seconds=float(predicted_drift_over_hour_seconds),
-            model="source_time = speed * master_time + offset_seconds",
-        ),
+        mapping=mapping,
         summary=SyncSummary(
             confidence=confidence,
             validated=not errors,

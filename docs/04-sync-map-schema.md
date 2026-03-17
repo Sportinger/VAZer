@@ -48,11 +48,15 @@ Die Laufparameter werden mitgespeichert, damit Sync-Ergebnisse reproduzierbar bl
 {
   "coarse_rate": 1000,
   "fine_rate": 4000,
+  "envelope_bin_seconds": 0.1,
   "activity_rate": 2000,
   "activity_window_seconds": 12.0,
   "anchor_count": 6,
   "anchor_window_seconds": 45.0,
-  "anchor_search_seconds": 1.5
+  "anchor_search_seconds": 1.5,
+  "coarse_candidate_limit": 6,
+  "anchor_activity_step_seconds": 10.0,
+  "anchor_min_spacing_seconds": 30.0
 }
 ```
 
@@ -89,18 +93,18 @@ Jeder Kamera-Eintrag hat einen Status:
     "absolute_stream_index": 1
   },
   "mapping": {
-    "speed": 0.999869857,
-    "offset_seconds": -71.133789,
-    "camera_starts_at_master_seconds": 71.143047,
-    "predicted_drift_over_hour_seconds": -0.468514,
+    "speed": 0.999991706,
+    "offset_seconds": 1062.789271,
+    "camera_starts_at_master_seconds": -1062.798083,
+    "predicted_drift_over_hour_seconds": -0.029858,
     "model": "source_time = speed * master_time + offset_seconds"
   },
   "coarse": {
     "map_specifier": "0:1",
-    "method": "bounded_direct",
-    "camera_starts_at_master_seconds": 71.325846,
-    "master_to_source_offset_seconds": -71.325846,
-    "peak_ratio": 1.294713
+    "method": "broad_cluster",
+    "camera_starts_at_master_seconds": -1062.779,
+    "master_to_source_offset_seconds": 1062.779,
+    "peak_ratio": 1.772
   },
   "anchors": {},
   "summary": {
@@ -111,11 +115,13 @@ Jeder Kamera-Eintrag hat einen Status:
       "anchor_count": 6,
       "accepted_anchor_count": 6,
       "accepted_anchor_ratio": 1.0,
-      "coarse_peak_ratio": 1.39,
-      "mean_accepted_peak_ratio": 1.23,
-      "accepted_offset_range_seconds": 0.39,
-      "residual_rmse_seconds": 0.12,
-      "residual_max_abs_seconds": 0.26
+      "coarse_peak_ratio": 1.77,
+      "mean_accepted_peak_ratio": 4.47,
+      "accepted_offset_range_seconds": 0.012,
+      "residual_rmse_seconds": 0.004,
+      "residual_max_abs_seconds": 0.009,
+      "candidate_count_evaluated": 6,
+      "validated_candidate_count": 1
     },
     "notes": []
   }
@@ -150,6 +156,12 @@ Ein `failed`-Eintrag kann also zwei Ursachen haben:
 
 - kein brauchbares Kamera-Audio fuer Sync
 - ein formal berechnetes Mapping, das die Quality-Gates nicht besteht
+
+Wichtig:
+
+- `sync_map` speichert jetzt den Gewinner aus mehreren coarse Kandidaten
+- ein hoher Peak allein reicht nicht mehr
+- entscheidend ist die Konsistenz der Fine-Anchors
 
 ## asset_id
 

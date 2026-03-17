@@ -144,6 +144,9 @@ def build_sync_map(
             "anchor_count": sync_options.anchor_count,
             "anchor_window_seconds": sync_options.anchor_window_seconds,
             "anchor_search_seconds": sync_options.anchor_search_seconds,
+            "coarse_candidate_limit": sync_options.coarse_candidate_limit,
+            "anchor_activity_step_seconds": sync_options.anchor_activity_step_seconds,
+            "anchor_min_spacing_seconds": sync_options.anchor_min_spacing_seconds,
         },
         "entries": entries,
         "summary": {
