@@ -10,6 +10,7 @@ from . import __version__
 from .fftools import MediaInfo, probe_media
 
 EPSILON = 1e-6
+SENTENCE_ENDINGS = (".", "!", "?", ";", ":")
 
 
 @dataclass(slots=True)
@@ -28,12 +29,17 @@ class CoverageWindow:
     primary_video: dict[str, Any] | None
 
 
+@dataclass(slots=True)
+class DraftPlanOptions:
+    transcript_pause_boundary_seconds: float = 0.25
+
+
 def _utc_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def load_json_artifact(path: str) -> dict[str, Any]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def write_cut_plan(cut_plan: dict[str, Any], output_path: str) -> Path:
@@ -188,6 +194,57 @@ def _analysis_windows_by_asset(analysis_map: dict[str, Any] | None) -> dict[str,
             if isinstance(window, dict)
         ]
     return windows
+
+
+def _transcript_words(transcript_artifact: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if transcript_artifact is None:
+        return []
+
+    words = [
+        word
+        for word in transcript_artifact.get("words", [])
+        if isinstance(word, dict)
+    ]
+    words.sort(key=lambda item: (float(item["start_seconds"]), float(item["end_seconds"])))
+    return words
+
+
+def _transcript_boundary_candidates(
+    transcript_artifact: dict[str, Any] | None,
+    pause_boundary_seconds: float,
+) -> set[float]:
+    candidates: set[float] = set()
+    words = _transcript_words(transcript_artifact)
+    if not words:
+        return candidates
+
+    for index, word in enumerate(words):
+        word_start_seconds = float(word["start_seconds"])
+        word_end_seconds = float(word["end_seconds"])
+        text = str(word.get("text") or "").strip()
+        next_word = words[index + 1] if index + 1 < len(words) else None
+        previous_word = words[index - 1] if index > 0 else None
+
+        previous_gap_seconds = (
+            word_start_seconds - float(previous_word["end_seconds"])
+            if previous_word is not None
+            else 0.0
+        )
+        next_gap_seconds = (
+            float(next_word["start_seconds"]) - word_end_seconds
+            if next_word is not None
+            else 0.0
+        )
+        punctuation_boundary = text.endswith(SENTENCE_ENDINGS)
+        strong_start = previous_gap_seconds >= pause_boundary_seconds
+        strong_end = next_gap_seconds >= pause_boundary_seconds
+
+        if strong_start:
+            candidates.add(round(word_start_seconds, 6))
+        if strong_end or punctuation_boundary or next_word is None:
+            candidates.add(round(word_end_seconds, 6))
+
+    return candidates
 
 
 def _transcript_excerpt(
@@ -364,6 +421,7 @@ def build_baseline_cut_plan(
     source_analysis_path: str | None = None,
     transcript_artifact: dict[str, Any] | None = None,
     source_transcript_path: str | None = None,
+    options: DraftPlanOptions | None = None,
 ) -> dict[str, Any]:
     if sync_map.get("schema_version") != "vazer.sync_map.v1":
         raise ValueError("Unsupported sync_map schema version.")
@@ -376,6 +434,7 @@ def build_baseline_cut_plan(
     if not isinstance(master_path, str) or not master_path:
         raise ValueError("sync_map master path is missing.")
 
+    draft_options = options or DraftPlanOptions()
     master_duration_seconds = _require_duration(master_payload, "Master audio", master_path)
 
     synced_entries = [
@@ -406,6 +465,10 @@ def build_baseline_cut_plan(
     for segment in speech_segments:
         boundary_candidates.add(round(float(segment["start_seconds"]), 6))
         boundary_candidates.add(round(float(segment["end_seconds"]), 6))
+    boundary_candidates |= _transcript_boundary_candidates(
+        transcript_artifact,
+        draft_options.transcript_pause_boundary_seconds,
+    )
     for windows in windows_by_asset.values():
         for window in windows:
             boundary_candidates.add(round(float(window["master_start_seconds"]), 6))
@@ -544,6 +607,7 @@ def build_baseline_cut_plan(
 
     return {
         "schema_version": "vazer.cut_plan.v1",
+        "planning_stage": "draft",
         "generated_at_utc": _utc_timestamp(),
         "tool": {
             "name": "vazer",
@@ -565,6 +629,10 @@ def build_baseline_cut_plan(
             "schema_version": transcript_artifact["source"]["schema_version"],
             "path": source_transcript_path,
         },
+        "draft_options": {
+            "transcript_pause_boundary_seconds": draft_options.transcript_pause_boundary_seconds,
+            "word_timestamps_available": bool(_transcript_words(transcript_artifact)),
+        },
         "master_audio": {
             "path": master_path,
             "duration_seconds": master_duration_seconds,
@@ -581,6 +649,7 @@ def build_baseline_cut_plan(
         "video_segments": video_segments,
         "audio_segments": audio_segments,
         "summary": {
+            "planning_stage": "draft",
             "selected_assets": selected_assets,
             "dropped_assets": dropped_assets,
             "synced_assets": len(synced_entries),
@@ -588,5 +657,27 @@ def build_baseline_cut_plan(
             "output_duration_seconds": video_segments[-1]["output_end_seconds"],
             "signal_aware": analysis_map is not None or transcript_artifact is not None,
             "speech_segment_count": len(speech_segments),
+            "word_timestamps_available": bool(_transcript_words(transcript_artifact)),
         },
     }
+
+
+def build_draft_cut_plan(
+    sync_map: dict[str, Any],
+    *,
+    source_sync_map_path: str | None = None,
+    analysis_map: dict[str, Any] | None = None,
+    source_analysis_path: str | None = None,
+    transcript_artifact: dict[str, Any] | None = None,
+    source_transcript_path: str | None = None,
+    options: DraftPlanOptions | None = None,
+) -> dict[str, Any]:
+    return build_baseline_cut_plan(
+        sync_map,
+        source_sync_map_path=source_sync_map_path,
+        analysis_map=analysis_map,
+        source_analysis_path=source_analysis_path,
+        transcript_artifact=transcript_artifact,
+        source_transcript_path=source_transcript_path,
+        options=options,
+    )

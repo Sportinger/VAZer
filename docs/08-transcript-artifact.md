@@ -10,11 +10,11 @@ Wichtige Regel fuer VAZer:
 - Kamera-Audio wird nicht transkribiert
 - Kamera-Audio bleibt reines Sync-Signal
 
-Damit bleibt das Sprachmodell auf der besten Audioquelle und wir vermeiden unnötige Mehrfachtranskription derselben Szene.
+Damit bleibt das Sprachmodell auf der besten Audioquelle und wir vermeiden unnoetige Mehrfachtranskription derselben Szene.
 
 ## Warum Chunking
 
-Die OpenAI-Audio-Transcription akzeptiert keine beliebig grossen Einzeldateien. Deshalb zerlegt VAZer lange Master-Dateien in kleinere Upload-Chunks und setzt die Segment-Timestamps danach wieder auf die Master-Timeline zurück.
+Die OpenAI-Audio-Transcription akzeptiert keine beliebig grossen Einzeldateien. Deshalb zerlegt VAZer lange Master-Dateien in kleinere Upload-Chunks und setzt die Zeitstempel danach wieder auf die Master-Timeline zurueck.
 
 Aktuell:
 
@@ -25,12 +25,12 @@ Aktuell:
 
 ## Warum standardmaessig `whisper-1`
 
-VAZer nutzt fuer diesen ersten Transcription-Pfad standardmaessig `whisper-1`, weil wir segmentierte Zeitstempel brauchen.
+VAZer nutzt fuer diesen ersten Transcription-Pfad standardmaessig `whisper-1`, weil wir Segment- und Wort-Zeitstempel brauchen.
 
 Der aktuelle API-Pfad nutzt:
 
 - `response_format=verbose_json`
-- `timestamp_granularities=["segment"]`
+- `timestamp_granularities=["segment", "word"]`
 
 ## Top-Level
 
@@ -53,6 +53,7 @@ Der aktuelle API-Pfad nutzt:
   "text": "...",
   "chunks": [],
   "segments": [],
+  "words": [],
   "summary": {}
 }
 ```
@@ -70,7 +71,8 @@ Der aktuelle API-Pfad nutzt:
   "audio_bitrate": "64k",
   "language": "de",
   "text": "...",
-  "segment_count": 42
+  "segment_count": 42,
+  "word_count": 511
 }
 ```
 
@@ -85,6 +87,23 @@ Der aktuelle API-Pfad nutzt:
   "chunk_index": 1
 }
 ```
+
+## Word
+
+```json
+{
+  "start_seconds": 490.14,
+  "end_seconds": 490.42,
+  "text": "geht",
+  "chunk_index": 1
+}
+```
+
+Das Wort-Level ist die Grundlage fuer:
+
+- spaetere Satz- und Pausengrenzen im Draft-Plan
+- lokale Cut-Validierung direkt an gesprochenen Grenzen
+- deterministische Reparaturen ohne kompletten Re-Plan
 
 ## CLI
 
@@ -111,5 +130,3 @@ Beispiel in `.env.example`:
 ```dotenv
 OPENAI_API_KEY=your_openai_api_key_here
 ```
-
-Optionale Env-Werte koennen spaeter erweitert werden. Fuer den MVP reicht der API-Key.

@@ -6,7 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from .analysis import AnalysisOptions, build_analysis_map, load_analysis_map, write_analysis_map
-from .cut_plan import build_baseline_cut_plan, load_json_artifact, write_cut_plan
+from .cut_plan import DraftPlanOptions, build_baseline_cut_plan, build_draft_cut_plan, load_json_artifact, write_cut_plan
+from .cut_review import (
+    CutValidationOptions,
+    build_cut_validation_report,
+    load_cut_validation_report,
+    repair_cut_plan,
+    write_cut_validation_report,
+)
 from .render import build_render_scaffold, load_cut_plan
 from .sync import SyncOptions, analyze_sync
 from .sync_map import build_sync_map, write_sync_map
@@ -65,12 +72,87 @@ def _build_parser() -> argparse.ArgumentParser:
     baseline_parser.add_argument("--out", required=True, help="Path to the cut_plan JSON output.")
     baseline_parser.add_argument("--json", action="store_true", help="Print the generated cut_plan JSON to stdout.")
 
+    draft_parser = plan_subparsers.add_parser(
+        "draft",
+        help="Build a draft cut_plan from sync, cheap CV and optional transcript cues.",
+    )
+    draft_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    draft_parser.add_argument("--analysis", help="Optional analysis_map JSON file.")
+    draft_parser.add_argument("--transcript", help="Optional transcript JSON file.")
+    draft_parser.add_argument("--out", required=True, help="Path to the cut_plan JSON output.")
+    draft_parser.add_argument(
+        "--transcript-pause-boundary",
+        type=float,
+        default=DraftPlanOptions().transcript_pause_boundary_seconds,
+        help="Treat transcript pauses at or above this threshold as draft cut boundaries.",
+    )
+    draft_parser.add_argument("--json", action="store_true", help="Print the generated cut_plan JSON to stdout.")
+
+    validate_parser = plan_subparsers.add_parser(
+        "validate",
+        help="Validate only the proposed cut points with local transcript and cheap CV checks.",
+    )
+    validate_parser.add_argument("--cut-plan", required=True, help="Path to a cut_plan JSON file.")
+    validate_parser.add_argument("--sync-map", help="Optional sync_map JSON file for alternate-camera checks.")
+    validate_parser.add_argument("--analysis", help="Optional analysis_map JSON file.")
+    validate_parser.add_argument("--transcript", help="Optional transcript JSON file.")
+    validate_parser.add_argument("--out", required=True, help="Path to the cut_validation JSON output.")
+    validate_parser.add_argument(
+        "--transcript-search-window",
+        type=float,
+        default=CutValidationOptions().transcript_search_window_seconds,
+        help="Search radius around each cut for a better transcript boundary.",
+    )
+    validate_parser.add_argument(
+        "--transcript-pause-boundary",
+        type=float,
+        default=CutValidationOptions().transcript_pause_boundary_seconds,
+        help="Transcript pause threshold used when ranking cut-boundary candidates.",
+    )
+    validate_parser.add_argument(
+        "--cut-context",
+        type=float,
+        default=CutValidationOptions().cut_context_seconds,
+        help="Master-time context window around a cut for local quality checks.",
+    )
+    validate_parser.add_argument(
+        "--probe-delta",
+        type=float,
+        default=CutValidationOptions().local_probe_delta_seconds,
+        help="Distance around the cut frame for sparse local frame probes.",
+    )
+    validate_parser.add_argument(
+        "--probe-width",
+        type=int,
+        default=CutValidationOptions().local_probe_width,
+        help="Maximum width for sparse cut-frame probes.",
+    )
+    validate_parser.add_argument("--json", action="store_true", help="Print the generated validation JSON to stdout.")
+
+    repair_parser = plan_subparsers.add_parser(
+        "repair",
+        help="Apply deterministic local cut repairs from an existing cut_validation report.",
+    )
+    repair_parser.add_argument("--cut-plan", required=True, help="Path to a cut_plan JSON file.")
+    repair_parser.add_argument("--validation", required=True, help="Path to a cut_validation JSON file.")
+    repair_parser.add_argument("--sync-map", help="Optional sync_map JSON file for alternate-camera repairs.")
+    repair_parser.add_argument("--analysis", help="Optional analysis_map JSON file.")
+    repair_parser.add_argument("--transcript", help="Optional transcript JSON file.")
+    repair_parser.add_argument("--out", required=True, help="Path to the repaired cut_plan JSON output.")
+    repair_parser.add_argument(
+        "--repair-min-segment",
+        type=float,
+        default=CutValidationOptions().repair_min_segment_seconds,
+        help="Minimum segment duration that repair is allowed to preserve.",
+    )
+    repair_parser.add_argument("--json", action="store_true", help="Print the repaired cut_plan JSON to stdout.")
+
     analyze_parser = root_subparsers.add_parser("analyze", help="Technical signal analysis.")
     analyze_subparsers = analyze_parser.add_subparsers(dest="analyze_command")
 
     technical_parser = analyze_subparsers.add_parser(
         "technical",
-        help="Build an analysis_map with speech-like master activity and camera quality windows.",
+        help="Build a cheap no-proxy analysis_map with speech-like activity plus sparse sharpness/motion windows.",
     )
     technical_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
     technical_parser.add_argument("--out", required=True, help="Path to the analysis_map JSON output.")
@@ -144,6 +226,12 @@ def _build_analysis_options(args: argparse.Namespace) -> AnalysisOptions:
     )
 
 
+def _build_draft_plan_options(args: argparse.Namespace) -> DraftPlanOptions:
+    return DraftPlanOptions(
+        transcript_pause_boundary_seconds=args.transcript_pause_boundary,
+    )
+
+
 def _build_transcription_options(args: argparse.Namespace) -> TranscriptionOptions:
     return TranscriptionOptions(
         model=args.model,
@@ -152,6 +240,17 @@ def _build_transcription_options(args: argparse.Namespace) -> TranscriptionOptio
         chunk_seconds=args.chunk_seconds,
         audio_sample_rate=args.audio_sample_rate,
         audio_bitrate=args.audio_bitrate,
+    )
+
+
+def _build_cut_validation_options(args: argparse.Namespace) -> CutValidationOptions:
+    return CutValidationOptions(
+        transcript_search_window_seconds=args.transcript_search_window,
+        transcript_pause_boundary_seconds=args.transcript_pause_boundary,
+        cut_context_seconds=args.cut_context,
+        local_probe_delta_seconds=args.probe_delta,
+        local_probe_width=args.probe_width,
+        repair_min_segment_seconds=getattr(args, "repair_min_segment", CutValidationOptions().repair_min_segment_seconds),
     )
 
 
@@ -221,6 +320,7 @@ def _print_cut_plan_summary(cut_plan: dict[str, Any], output_path: Path) -> None
     summary = cut_plan["summary"]
     timeline = cut_plan["timeline"]
     print(f"Cut plan written to: {output_path}")
+    print(f"Planning stage: {cut_plan.get('planning_stage', summary.get('planning_stage', 'draft'))}")
     print(
         f"Output duration: {timeline['output_duration_seconds']:.3f} s "
         f"across {summary['video_segments']} video segments"
@@ -229,6 +329,8 @@ def _print_cut_plan_summary(cut_plan: dict[str, Any], output_path: Path) -> None
     if summary["dropped_assets"]:
         print(f"Dropped synced assets: {', '.join(summary['dropped_assets'])}")
     print(f"Signal-aware planning: {'yes' if summary['signal_aware'] else 'no'}")
+    if summary.get("repair_applied"):
+        print(f"Local repairs applied: {summary['repair_actions']}")
 
 
 def _print_analysis_map_summary(analysis_map: dict[str, Any], output_path: Path) -> None:
@@ -274,10 +376,33 @@ def _print_transcript_summary(transcript_artifact: dict[str, Any], output_path: 
     print(
         f"Chunks: {summary['chunk_count']}, "
         f"segments: {summary['segment_count']}, "
+        f"words: {summary.get('word_count', 0)}, "
         f"chars: {summary['character_count']}"
     )
     if transcript_artifact.get("language"):
         print(f"Language: {transcript_artifact['language']}")
+
+
+def _print_cut_validation_summary(report: dict[str, Any], output_path: Path) -> None:
+    summary = report["summary"]
+    print(f"Cut validation written to: {output_path}")
+    print(
+        f"Cuts: {summary['cuts_total']} total, "
+        f"{summary['ok']} ok, {summary['warn']} warn, {summary['fail']} fail"
+    )
+    print(f"Repairable cuts: {summary['repairable']}")
+
+
+def _resolve_optional_artifact_path(
+    explicit_path: str | None,
+    artifact_payload: dict[str, Any] | None,
+) -> str | None:
+    if explicit_path:
+        return explicit_path
+    if not isinstance(artifact_payload, dict):
+        return None
+    candidate = artifact_payload.get("path")
+    return candidate if isinstance(candidate, str) and candidate else None
 
 
 def main() -> int:
@@ -325,18 +450,20 @@ def main() -> int:
         parser.print_help()
         return 1
 
-    if args.command == "plan" and args.plan_command == "baseline":
+    if args.command == "plan" and args.plan_command in {"baseline", "draft"}:
         try:
             sync_map = load_json_artifact(args.sync_map)
             analysis_map = None if not args.analysis else load_analysis_map(args.analysis)
             transcript_artifact = None if not args.transcript else load_transcript_artifact(args.transcript)
-            cut_plan = build_baseline_cut_plan(
+            builder = build_baseline_cut_plan if args.plan_command == "baseline" else build_draft_cut_plan
+            cut_plan = builder(
                 sync_map,
                 source_sync_map_path=args.sync_map,
                 analysis_map=analysis_map,
                 source_analysis_path=args.analysis,
                 transcript_artifact=transcript_artifact,
                 source_transcript_path=args.transcript,
+                options=None if args.plan_command == "baseline" else _build_draft_plan_options(args),
             )
             output_path = write_cut_plan(cut_plan, args.out)
         except Exception as error:  # pragma: no cover - CLI surface
@@ -346,6 +473,66 @@ def main() -> int:
             print(json.dumps(cut_plan, indent=2))
         else:
             _print_cut_plan_summary(cut_plan, output_path)
+        return 0
+
+    if args.command == "plan" and args.plan_command == "validate":
+        try:
+            cut_plan = load_cut_plan(args.cut_plan)
+            sync_map_path = _resolve_optional_artifact_path(args.sync_map, cut_plan.get("source_sync_map"))
+            analysis_path = _resolve_optional_artifact_path(args.analysis, cut_plan.get("source_analysis_map"))
+            transcript_path = _resolve_optional_artifact_path(args.transcript, cut_plan.get("source_transcript"))
+            sync_map = None if not sync_map_path else load_json_artifact(sync_map_path)
+            analysis_map = None if not analysis_path else load_analysis_map(analysis_path)
+            transcript_artifact = None if not transcript_path else load_transcript_artifact(transcript_path)
+            report = build_cut_validation_report(
+                cut_plan,
+                sync_map=sync_map,
+                source_cut_plan_path=args.cut_plan,
+                source_sync_map_path=sync_map_path,
+                analysis_map=analysis_map,
+                source_analysis_path=analysis_path,
+                transcript_artifact=transcript_artifact,
+                source_transcript_path=transcript_path,
+                options=_build_cut_validation_options(args),
+            )
+            output_path = write_cut_validation_report(report, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            _print_cut_validation_summary(report, output_path)
+        return 0 if report["summary"]["fail"] == 0 else 1
+
+    if args.command == "plan" and args.plan_command == "repair":
+        try:
+            cut_plan = load_cut_plan(args.cut_plan)
+            validation_report = load_cut_validation_report(args.validation)
+            sync_map_path = _resolve_optional_artifact_path(args.sync_map, cut_plan.get("source_sync_map"))
+            analysis_path = _resolve_optional_artifact_path(args.analysis, cut_plan.get("source_analysis_map"))
+            transcript_path = _resolve_optional_artifact_path(args.transcript, cut_plan.get("source_transcript"))
+            sync_map = None if not sync_map_path else load_json_artifact(sync_map_path)
+            analysis_map = None if not analysis_path else load_analysis_map(analysis_path)
+            transcript_artifact = None if not transcript_path else load_transcript_artifact(transcript_path)
+            repaired_cut_plan = repair_cut_plan(
+                cut_plan,
+                validation_report,
+                sync_map=sync_map,
+                source_cut_plan_path=args.cut_plan,
+                source_validation_path=args.validation,
+                analysis_map=analysis_map,
+                transcript_artifact=transcript_artifact,
+                options=CutValidationOptions(repair_min_segment_seconds=args.repair_min_segment),
+            )
+            output_path = write_cut_plan(repaired_cut_plan, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(repaired_cut_plan, indent=2))
+        else:
+            _print_cut_plan_summary(repaired_cut_plan, output_path)
         return 0
 
     if args.command == "analyze" and args.analyze_command == "technical":

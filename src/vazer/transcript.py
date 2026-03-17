@@ -14,6 +14,13 @@ class TranscriptSegment:
     speaker: str | None
 
 
+@dataclass(slots=True)
+class TranscriptWord:
+    start_seconds: float
+    end_seconds: float
+    text: str
+
+
 def _coerce_float(value: Any, field_name: str) -> float:
     try:
         number = float(value)
@@ -40,8 +47,31 @@ def _normalize_segment(segment: dict[str, Any]) -> TranscriptSegment:
     )
 
 
+def _normalize_word(word: dict[str, Any]) -> TranscriptWord:
+    start_value = word.get("start_seconds", word.get("start"))
+    end_value = word.get("end_seconds", word.get("end"))
+    text = word.get("text", word.get("word", ""))
+
+    start_seconds = _coerce_float(start_value, "start_seconds")
+    end_seconds = _coerce_float(end_value, "end_seconds")
+    if end_seconds <= start_seconds:
+        raise ValueError("Transcript word end must be greater than start.")
+
+    normalized_text = "" if text is None else str(text).strip()
+    if not normalized_text:
+        raise ValueError("Transcript word text must not be empty.")
+
+    return TranscriptWord(
+        start_seconds=start_seconds,
+        end_seconds=end_seconds,
+        text=normalized_text,
+    )
+
+
 def load_transcript_artifact(path: str) -> dict[str, Any]:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    raw_words: list[Any] = []
+    text = None
 
     if isinstance(payload, list):
         raw_segments = payload
@@ -50,12 +80,16 @@ def load_transcript_artifact(path: str) -> dict[str, Any]:
     elif isinstance(payload, dict):
         if payload.get("schema_version") == "vazer.transcript.v1":
             raw_segments = payload.get("segments", [])
+            raw_words = payload.get("words", [])
+            text = payload.get("text")
             source = {
                 "path": path,
                 "schema_version": payload["schema_version"],
             }
         elif isinstance(payload.get("segments"), list):
             raw_segments = payload["segments"]
+            raw_words = payload.get("words", [])
+            text = payload.get("text")
             source = {
                 "path": path,
                 "schema_version": payload.get("schema_version", "external.segments"),
@@ -67,12 +101,17 @@ def load_transcript_artifact(path: str) -> dict[str, Any]:
 
     if not isinstance(raw_segments, list):
         raise ValueError("Transcript segments must be a list.")
+    if raw_words and not isinstance(raw_words, list):
+        raise ValueError("Transcript words must be a list.")
 
     segments = [_normalize_segment(segment) for segment in raw_segments if isinstance(segment, dict)]
     segments.sort(key=lambda segment: (segment.start_seconds, segment.end_seconds))
+    words = [_normalize_word(word) for word in raw_words if isinstance(word, dict)]
+    words.sort(key=lambda word: (word.start_seconds, word.end_seconds))
 
     return {
         "source": source,
+        "text": None if text is None else str(text),
         "segments": [
             {
                 "start_seconds": segment.start_seconds,
@@ -81,5 +120,13 @@ def load_transcript_artifact(path: str) -> dict[str, Any]:
                 "speaker": segment.speaker,
             }
             for segment in segments
+        ],
+        "words": [
+            {
+                "start_seconds": word.start_seconds,
+                "end_seconds": word.end_seconds,
+                "text": word.text,
+            }
+            for word in words
         ],
     }

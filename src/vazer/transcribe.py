@@ -68,7 +68,7 @@ def _resolve_master_path(master_path: str | None, sync_map_path: str | None) -> 
     if not sync_map_path:
         raise ValueError("Either --master or --sync-map is required.")
 
-    payload = json.loads(Path(sync_map_path).read_text(encoding="utf-8"))
+    payload = json.loads(Path(sync_map_path).read_text(encoding="utf-8-sig"))
     master_payload = payload.get("master")
     if not isinstance(master_payload, dict) or not isinstance(master_payload.get("path"), str):
         raise ValueError("sync_map does not expose a usable master path.")
@@ -130,6 +130,12 @@ def _prompt_for_chunk(base_prompt: str | None, previous_text_tail: str | None) -
     return prompt or None
 
 
+def _timestamp_granularities_for_model(model: str) -> list[str]:
+    if model == "whisper-1":
+        return ["segment", "word"]
+    return ["segment"]
+
+
 def build_master_transcript(
     master_path: str,
     *,
@@ -155,6 +161,7 @@ def build_master_transcript(
 
     chunks: list[dict[str, Any]] = []
     segments: list[dict[str, Any]] = []
+    words: list[dict[str, Any]] = []
     full_text_parts: list[str] = []
     previous_text_tail: str | None = None
     detected_language: str | None = None
@@ -177,7 +184,7 @@ def build_master_transcript(
             request_kwargs: dict[str, Any] = {
                 "model": transcription_options.model,
                 "response_format": "verbose_json",
-                "timestamp_granularities": ["segment"],
+                "timestamp_granularities": _timestamp_granularities_for_model(transcription_options.model),
             }
             if transcription_options.language:
                 request_kwargs["language"] = transcription_options.language
@@ -219,6 +226,26 @@ def build_master_transcript(
                 normalized_chunk_segments.append(segment)
                 segments.append(segment)
 
+            raw_words = payload.get("words", [])
+            normalized_chunk_words: list[dict[str, Any]] = []
+            for raw_word in raw_words if isinstance(raw_words, list) else []:
+                if not isinstance(raw_word, dict):
+                    continue
+                start_value = raw_word.get("start")
+                end_value = raw_word.get("end")
+                if start_value is None or end_value is None:
+                    continue
+
+                word = {
+                    "start_seconds": float(start_value) + chunk_start_seconds,
+                    "end_seconds": float(end_value) + chunk_start_seconds,
+                    "text": str(raw_word.get("word") or raw_word.get("text") or "").strip(),
+                    "chunk_index": index + 1,
+                }
+                if word["text"]:
+                    normalized_chunk_words.append(word)
+                    words.append(word)
+
             chunks.append(
                 {
                     "index": index + 1,
@@ -231,6 +258,7 @@ def build_master_transcript(
                     "language": chunk_language,
                     "text": chunk_text,
                     "segment_count": len(normalized_chunk_segments),
+                    "word_count": len(normalized_chunk_words),
                 }
             )
             if chunk_text:
@@ -271,9 +299,11 @@ def build_master_transcript(
         "text": full_text,
         "chunks": chunks,
         "segments": segments,
+        "words": words,
         "summary": {
             "chunk_count": len(chunks),
             "segment_count": len(segments),
+            "word_count": len(words),
             "character_count": len(full_text),
         },
     }

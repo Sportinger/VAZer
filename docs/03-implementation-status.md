@@ -18,6 +18,7 @@ Warum Python fuer diesen Start:
 - `src/vazer/sync.py`: Stream-Auswahl, Coarse Sync, Anchor-Fit, Drift-Modell
 - `src/vazer/analysis.py`: speech-like Master-Aktivitaet und technische Kameraanalyse
 - `src/vazer/cut_plan.py`: baseline- und signal-aware Planer
+- `src/vazer/cut_review.py`: lokale Cut-Validierung und deterministische Reparatur
 - `src/vazer/render.py`: ffmpeg-Scaffold aus `cut_plan`
 - `src/vazer/transcribe.py`: OpenAI-Transcription nur fuer das Master-Audio
 - `src/vazer/transcript.py`: Loader fuer externe Transcript-Artefakte
@@ -32,8 +33,11 @@ Warum Python fuer diesen Start:
 - lineares Zeitmodell `source_time = speed * master_time + offset` fitten
 - mehrere Kamera-Dateien in ein gemeinsames `sync_map.json` schreiben
 - nur die Masterspur per OpenAI in ein `transcript.json` transkribieren
+- Segment- und Wort-Zeitstempel aus `whisper-1` holen
 - ein `analysis_map.json` aus `sync_map` erzeugen
-- ein baseline oder signal-aware `cut_plan.json` aus `sync_map` erzeugen
+- ein baseline oder draft `cut_plan.json` aus `sync_map` erzeugen
+- lokale `cut_validation.json` nur an den Cut-Stellen berechnen
+- einen bestehenden Plan deterministisch in ein `cut_plan.repaired.json` ueberfuehren
 - einen ffmpeg-Render-Scaffold aus `cut_plan` erzeugen
 
 ## Smoke-Test mit den Beispiel-Dateien
@@ -53,7 +57,9 @@ Der aktuelle Sync-Lauf liefert fuer die Testdateien:
 - `VAZ Chaos HT.MXF` liegt bei ca. `-1046.204 s`
 - die neuen Fits haben sehr kleine Residuen und durchgehend `6/6` akzeptierte Anchors
 - die technische Analyse erzeugt ein `analysis_map` mit `382` speech-like Master-Segmenten
-- der signal-aware `cut_plan` kann damit wieder auf allen drei Kameras arbeiten
+- der neue `plan draft` laeuft auf diesem billigen CV-Pfad ohne Proxies
+- die Cut-Validierung prueft nur lokale Cut-Stellen statt erneut das ganze Material
+- ein synthetischer 20s-Slice bestaetigt, dass `validate -> repair` Cuts verschieben und Assets lokal austauschen kann
 - der Render-Scaffold fuer diesen Plan wird sauber erzeugt, ein voller ffmpeg-Smoke-Test ist bei langen 4K-H.264-Quellen aber noch bewusst teuer
 
 Das ist noch kein finaler Produktionswert, aber ein belastbarer erster Kern fuer `sync_map -> analysis_map -> cut_plan -> render scaffold`.
@@ -86,11 +92,32 @@ $env:PYTHONPATH='src'
 python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --out .\artifacts\cut_plan.json
 ```
 
+Draft-Plan:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer plan draft --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --transcript .\artifacts\transcript.json --out .\artifacts\cut_plan.json
+```
+
 Technische Analyse:
 
 ```powershell
 $env:PYTHONPATH='src'
 python -m vazer analyze technical --sync-map .\artifacts\sync_map.json --out .\artifacts\analysis_map.json
+```
+
+Cut-Validierung:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer plan validate --cut-plan .\artifacts\cut_plan.json --out .\artifacts\cut_validation.json
+```
+
+Lokale Reparatur:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer plan repair --cut-plan .\artifacts\cut_plan.json --validation .\artifacts\cut_validation.json --out .\artifacts\cut_plan.repaired.json
 ```
 
 Signal-aware Plan:
@@ -120,3 +147,4 @@ python -m vazer render scaffold --cut-plan .\artifacts\cut_plan.json --output-me
 - Proxy-/Preview-Pipeline fuer schnellere technische Analyse und Render-Checks
 - echtes `render run` statt nur Scaffold
 - spaeter piecewise Sync fuer Clips, bei denen auch der Rescue-Pfad nicht reicht
+- dichtere CV-Signale wie Face-Presence, Shot-Boundaries und Framing

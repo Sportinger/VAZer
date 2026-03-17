@@ -416,7 +416,7 @@ def build_analysis_map(
 
 
 def load_analysis_map(path: str) -> dict[str, Any]:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def write_analysis_map(analysis_map: dict[str, Any], output_path: str) -> Path:

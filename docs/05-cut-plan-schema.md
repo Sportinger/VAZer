@@ -4,7 +4,7 @@
 
 `cut_plan` ist das erste Artefakt, das bereits schnittorientiert ist.
 
-Es nimmt ein `sync_map` und macht daraus:
+Es nimmt `sync_map`, billige technische Signale und optional ein Transcript und macht daraus:
 
 - eine Auswahl der verwendeten Kameraquellen
 - konkrete Segmente auf der Master-Timeline
@@ -27,6 +27,7 @@ Damit muessen Pausen oder unbedeckte Master-Bereiche nicht als schwarze Luecken 
 ```json
 {
   "schema_version": "vazer.cut_plan.v1",
+  "planning_stage": "draft",
   "generated_at_utc": "2026-03-17T16:20:00Z",
   "tool": {
     "name": "vazer",
@@ -35,6 +36,8 @@ Damit muessen Pausen oder unbedeckte Master-Bereiche nicht als schwarze Luecken 
   "source_sync_map": {},
   "source_analysis_map": null,
   "source_transcript": null,
+  "source_validation_report": null,
+  "draft_options": {},
   "master_audio": {},
   "render_defaults": {},
   "timeline": {},
@@ -44,19 +47,25 @@ Damit muessen Pausen oder unbedeckte Master-Bereiche nicht als schwarze Luecken 
 }
 ```
 
-## Planer
+`planning_stage` ist aktuell entweder:
 
-Der aktuelle Planer hat zwei Modi:
+- `draft`
+- `repaired`
 
-- `baseline_best_available`
-- `signal_aware_best_available`
+## Draft-Planer
 
-Der erste Modus nutzt nur das `sync_map`.
+Der aktuelle Draft-Planer hat zwei CLI-Einstiege:
 
-Der zweite Modus nimmt optional hinzu:
+- `plan baseline`
+- `plan draft`
 
-- `analysis_map`
-- ein externes Transcript-Artefakt
+`baseline` bleibt kompatibel zum alten MVP.
+
+`draft` ist der klarere neue Einstieg fuer:
+
+- `sync_map`
+- billiges `analysis_map`
+- optionales Transcript mit Wort-Zeitstempeln
 
 Die Kernlogik bleibt bewusst simpel:
 
@@ -64,28 +73,14 @@ Die Kernlogik bleibt bewusst simpel:
 - berechne ihre echte Ueberdeckung auf der Master-Timeline
 - teile die Timeline an allen Start-/Endgrenzen
 - erweitere die Grenzen optional um speech-like Segmente und Analysefenster
+- erweitere die Grenzen zusaetzlich um starke Transcript-Pausen und Wortgrenzen
 - waehle pro Intervall die beste verfuegbare Kamera
 - entferne Luecken aus dem Output
 - baue Audio-Segmente aus derselben Master-Zeit
 
-Im Mehrkamera-Testordner fuehrt das aktuell zu einem signal-aware Plan mit `306` Video-Segmenten ueber die komplette Output-Laenge.
-
-Aktuelle Auswahlregel ohne Analyse:
-
-- hoehere Konfidenz gewinnt
-- dann mehr akzeptierte Anchors
-- dann bessere grobe Peak-Ratio
-- dann geringere prognostizierte Drift
-
-Aktuelle Auswahlregel mit Analyse:
-
-- bei speech-like Intervallen zaehlen zuerst `usable_score`, `stability_score`, `sharpness_score`
-- danach weiter Sync-Konfidenz, Anchor-Anzahl und Drift
-- eine kleine Kontinuitaets-Praeferenz verhindert unnoetige schnelle Wechsel
-
 ## render_defaults
 
-Der Baseline-Planer speichert empfohlene Render-Werte, damit der Render-Scaffold eine konkrete Zielnormalisierung hat.
+Der Draft-Planer speichert empfohlene Render-Werte, damit der Render-Scaffold eine konkrete Zielnormalisierung hat.
 
 ```json
 {
@@ -121,10 +116,11 @@ Der Baseline-Planer speichert empfohlene Render-Werte, damit der Render-Scaffold
     "speech_like": true,
     "speech_overlap_ratio": 1.0,
     "speech_sources": [
-      "analysis"
+      "analysis",
+      "transcript"
     ],
-    "transcript_overlap_count": 0,
-    "transcript_excerpt": null,
+    "transcript_overlap_count": 1,
+    "transcript_excerpt": "...",
     "usable_score": 0.75,
     "sharpness_score": 0.81,
     "stability_score": 0.67,
@@ -150,25 +146,50 @@ Der Baseline-Planer speichert empfohlene Render-Werte, damit der Render-Scaffold
 }
 ```
 
-## Aktueller CLI-Command
+## Repair-Metadaten
 
-```powershell
-$env:PYTHONPATH='src'
-python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --out .\artifacts\cut_plan.json
+Ein reparierter Plan behaelt dasselbe Schema, bekommt aber zusaetzlich:
+
+```json
+{
+  "planning_stage": "repaired",
+  "source_validation_report": {
+    "schema_version": "vazer.cut_validation.v1",
+    "path": ".\\artifacts\\cut_validation.json"
+  },
+  "repair": {
+    "source_validation_report": {},
+    "applied_cut_actions": [],
+    "summary": {
+      "applied_cut_actions": 2,
+      "shifted_cuts": 2,
+      "asset_swaps": 1
+    }
+  }
+}
 ```
 
-Mit technischer Analyse:
+## CLI
+
+Draft:
 
 ```powershell
 $env:PYTHONPATH='src'
-python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --out .\artifacts\cut_plan.json
+python -m vazer plan draft --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --transcript .\artifacts\transcript.json --out .\artifacts\cut_plan.json
 ```
 
-Mit zusaetzlichem Transcript:
+Validierung:
 
 ```powershell
 $env:PYTHONPATH='src'
-python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --transcript .\artifacts\transcript.json --out .\artifacts\cut_plan.json
+python -m vazer plan validate --cut-plan .\artifacts\cut_plan.json --out .\artifacts\cut_validation.json
+```
+
+Reparatur:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer plan repair --cut-plan .\artifacts\cut_plan.json --validation .\artifacts\cut_validation.json --out .\artifacts\cut_plan.repaired.json
 ```
 
 ## Bewusste Grenzen von v1
@@ -176,4 +197,4 @@ python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --analysis .\
 - noch keine Blenden oder komplexen Transitionen
 - noch keine manuelle Priorisierung einzelner Kameras
 - noch keine Black/Gap-Filler-Segmente
-- noch keine semantische Transcript-Auswertung, nur Zeitfenster-Nutzung
+- Validierung und Reparatur sind lokal und deterministisch, nicht semantisch vollstaendig

@@ -9,6 +9,12 @@ Aktuell kommen zwei Signalarten hinein:
 - speech-like Aktivitaet auf der Masterspur
 - grobe Kameraqualitaet pro Zeitfenster auf der Master-Timeline
 
+Wichtiger Punkt fuer den aktuellen MVP:
+
+- keine Proxies
+- keine Voll-Dekodierung
+- billiges CV direkt auf den Originaldateien ueber sparse Seeks
+
 Das Artefakt ist bewusst noch technisch und regelbasiert. Es soll dem Planer helfen, bessere Kamerawechsel zu treffen, ohne schon semantische Szenenerkennung oder ein LLM zu brauchen.
 
 ## Top-Level
@@ -136,11 +142,11 @@ Optionale Tuning-Flags:
 
 ## Aktueller Einsatz im Planer
 
-`plan baseline` kann jetzt optional auf `analysis_map` und ein externes Transcript zugreifen:
+`plan draft` kann jetzt optional auf `analysis_map` und ein externes Transcript zugreifen:
 
 ```powershell
 $env:PYTHONPATH='src'
-python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --out .\artifacts\cut_plan.json
+python -m vazer plan draft --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --out .\artifacts\cut_plan.json
 ```
 
 Bei speech-like Intervallen priorisiert der Planer aktuell staerkere technische Kamerafenster. In ruhigen Bereichen bleibt Sync-Konfidenz weiter ein wichtiges Signal.

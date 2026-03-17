@@ -11,10 +11,11 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [04-sync-map-schema.md](./04-sync-map-schema.md): persistierbares Batch-Format fuer Master- und Kamera-Sync
 - [05-cut-plan-schema.md](./05-cut-plan-schema.md): erstes persistierbares Schnitt-Artefakt aus `sync_map`
 - [06-render-scaffold.md](./06-render-scaffold.md): ffmpeg-Scaffold aus `cut_plan`
-- [07-analysis-map-schema.md](./07-analysis-map-schema.md): technische Signale aus Master-Audio und Kamera-Video fuer signal-aware Planung
-- [08-transcript-artifact.md](./08-transcript-artifact.md): OpenAI-Transcription nur fuer das Master-Audio
+- [07-analysis-map-schema.md](./07-analysis-map-schema.md): billiges no-proxy CV aus Master-Audio und Kamera-Video fuer Draft-Planung
+- [08-transcript-artifact.md](./08-transcript-artifact.md): OpenAI-Transcription nur fuer das Master-Audio mit Wort-Zeitstempeln
+- [09-cut-review-workflow.md](./09-cut-review-workflow.md): `draft -> validate -> repair` fuer lokale technische Pruefung von Cut-Stellen
 
 ## Naechste Docs
 
-- Analyse-Signale fuer die spaetere Kameraauswahl
-- manuelle Korrekturen und Review-Workflow
+- manuelle Korrekturen und Review-Workflow ueber das neue Repair-Schema hinaus
+- spaetere semantische Signale wie Sprecherwechsel, Shot-Boundaries und Face-Presence
