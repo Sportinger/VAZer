@@ -25,3 +25,7 @@ Desktop.ini
 # Logs
 *.log
 npm-debug.log*
+
+# Local terminal tooling
+.terminal_*
+.terminal_locks/
