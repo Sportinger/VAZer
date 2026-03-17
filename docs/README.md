@@ -12,9 +12,9 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [05-cut-plan-schema.md](./05-cut-plan-schema.md): erstes persistierbares Schnitt-Artefakt aus `sync_map`
 - [06-render-scaffold.md](./06-render-scaffold.md): ffmpeg-Scaffold aus `cut_plan`
 - [07-analysis-map-schema.md](./07-analysis-map-schema.md): technische Signale aus Master-Audio und Kamera-Video fuer signal-aware Planung
+- [08-transcript-artifact.md](./08-transcript-artifact.md): OpenAI-Transcription nur fuer das Master-Audio
 
 ## Naechste Docs
 
-- Datenmodell fuer Transcript-Export
 - Analyse-Signale fuer die spaetere Kameraauswahl
 - manuelle Korrekturen und Review-Workflow

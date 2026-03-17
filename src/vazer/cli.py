@@ -10,6 +10,7 @@ from .cut_plan import build_baseline_cut_plan, load_json_artifact, write_cut_pla
 from .render import build_render_scaffold, load_cut_plan
 from .sync import SyncOptions, analyze_sync
 from .sync_map import build_sync_map, write_sync_map
+from .transcribe import TranscriptionOptions, build_master_transcript, write_transcript_artifact
 from .transcript import load_transcript_artifact
 
 
@@ -82,6 +83,25 @@ def _build_parser() -> argparse.ArgumentParser:
     technical_parser.add_argument("--analysis-width", type=int, default=AnalysisOptions().analysis_width)
     technical_parser.add_argument("--json", action="store_true", help="Print the generated analysis_map JSON to stdout.")
 
+    transcribe_parser = root_subparsers.add_parser("transcribe", help="Master-audio transcription.")
+    transcribe_subparsers = transcribe_parser.add_subparsers(dest="transcribe_command")
+
+    master_transcribe_parser = transcribe_subparsers.add_parser(
+        "master",
+        help="Transcribe only the canonical master audio via OpenAI.",
+    )
+    master_source_group = master_transcribe_parser.add_mutually_exclusive_group(required=True)
+    master_source_group.add_argument("--master", help="Path to the master audio file.")
+    master_source_group.add_argument("--sync-map", help="Path to an existing sync_map JSON file.")
+    master_transcribe_parser.add_argument("--out", required=True, help="Path to the transcript JSON output.")
+    master_transcribe_parser.add_argument("--model", default=TranscriptionOptions().model)
+    master_transcribe_parser.add_argument("--language", help="Optional language code, for example de.")
+    master_transcribe_parser.add_argument("--prompt", help="Optional transcription prompt/style primer.")
+    master_transcribe_parser.add_argument("--chunk-seconds", type=float, default=TranscriptionOptions().chunk_seconds)
+    master_transcribe_parser.add_argument("--audio-sample-rate", type=int, default=TranscriptionOptions().audio_sample_rate)
+    master_transcribe_parser.add_argument("--audio-bitrate", default=TranscriptionOptions().audio_bitrate)
+    master_transcribe_parser.add_argument("--json", action="store_true", help="Print the generated transcript JSON to stdout.")
+
     render_parser = root_subparsers.add_parser("render", help="Render scaffolding.")
     render_subparsers = render_parser.add_subparsers(dest="render_command")
 
@@ -121,6 +141,17 @@ def _build_analysis_options(args: argparse.Namespace) -> AnalysisOptions:
         video_sample_interval_seconds=args.video_sample_interval,
         video_window_seconds=args.video_window,
         analysis_width=args.analysis_width,
+    )
+
+
+def _build_transcription_options(args: argparse.Namespace) -> TranscriptionOptions:
+    return TranscriptionOptions(
+        model=args.model,
+        language=args.language,
+        prompt=args.prompt,
+        chunk_seconds=args.chunk_seconds,
+        audio_sample_rate=args.audio_sample_rate,
+        audio_bitrate=args.audio_bitrate,
     )
 
 
@@ -233,6 +264,22 @@ def _print_render_scaffold_summary(manifest: dict[str, Any]) -> None:
     print(f"Output duration: {output['duration_seconds']:.3f} s")
 
 
+def _print_transcript_summary(transcript_artifact: dict[str, Any], output_path: Path) -> None:
+    summary = transcript_artifact["summary"]
+    provider = transcript_artifact["provider"]
+    master_audio = transcript_artifact["master_audio"]
+    print(f"Transcript written to: {output_path}")
+    print(f"Master: {Path(master_audio['path']).name}")
+    print(f"Model: {provider['model']}")
+    print(
+        f"Chunks: {summary['chunk_count']}, "
+        f"segments: {summary['segment_count']}, "
+        f"chars: {summary['character_count']}"
+    )
+    if transcript_artifact.get("language"):
+        print(f"Language: {transcript_artifact['language']}")
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
@@ -318,6 +365,34 @@ def main() -> int:
         else:
             _print_analysis_map_summary(analysis_map, output_path)
         return 0 if analysis_map["summary"]["analyzed"] > 0 else 1
+
+    if args.command == "transcribe" and args.transcribe_command == "master":
+        try:
+            master_path = args.master
+            if args.sync_map:
+                sync_map = load_json_artifact(args.sync_map)
+                master_payload = sync_map.get("master")
+                if not isinstance(master_payload, dict) or not isinstance(master_payload.get("path"), str):
+                    raise ValueError("sync_map does not expose a usable master path.")
+                master_path = master_payload["path"]
+
+            if not master_path:
+                raise ValueError("A master audio path is required.")
+
+            transcript_artifact = build_master_transcript(
+                master_path,
+                source_sync_map_path=args.sync_map,
+                options=_build_transcription_options(args),
+            )
+            output_path = write_transcript_artifact(transcript_artifact, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(transcript_artifact, indent=2))
+        else:
+            _print_transcript_summary(transcript_artifact, output_path)
+        return 0
 
     if args.command == "render" and args.render_command == "scaffold":
         try:

@@ -19,6 +19,7 @@ Warum Python fuer diesen Start:
 - `src/vazer/analysis.py`: speech-like Master-Aktivitaet und technische Kameraanalyse
 - `src/vazer/cut_plan.py`: baseline- und signal-aware Planer
 - `src/vazer/render.py`: ffmpeg-Scaffold aus `cut_plan`
+- `src/vazer/transcribe.py`: OpenAI-Transcription nur fuer das Master-Audio
 - `src/vazer/transcript.py`: Loader fuer externe Transcript-Artefakte
 
 ## Bereits funktional
@@ -30,6 +31,7 @@ Warum Python fuer diesen Start:
 - mehrere Fine-Sync-Anker messen
 - lineares Zeitmodell `source_time = speed * master_time + offset` fitten
 - mehrere Kamera-Dateien in ein gemeinsames `sync_map.json` schreiben
+- nur die Masterspur per OpenAI in ein `transcript.json` transkribieren
 - ein `analysis_map.json` aus `sync_map` erzeugen
 - ein baseline oder signal-aware `cut_plan.json` aus `sync_map` erzeugen
 - einen ffmpeg-Render-Scaffold aus `cut_plan` erzeugen
@@ -96,6 +98,13 @@ Signal-aware Plan:
 ```powershell
 $env:PYTHONPATH='src'
 python -m vazer plan baseline --sync-map .\artifacts\sync_map.json --analysis .\artifacts\analysis_map.json --out .\artifacts\cut_plan.json
+```
+
+Master-Transcription:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer transcribe master --master <master.wav> --out .\artifacts\transcript.json
 ```
 
 Render-Scaffold:
