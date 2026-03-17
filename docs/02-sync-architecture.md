@@ -176,6 +176,23 @@ Optional:
 - Der Sync speist jetzt bereits `analysis_map` und `cut_plan`, aber noch ohne explizite Review-Gates.
 - Noch kein automatischer Render-Lauf, nur ein Render-Scaffold.
 
+## Quality Gates
+
+Ein formal berechneter Sync wird nicht mehr automatisch als gueltig behandelt.
+
+Aktuell wird ein Mapping verworfen, wenn die akzeptierten Anchor-Fenster intern zu stark streuen.
+
+Derzeitige harte Gates:
+
+- Residual-RMS der akzeptierten Anchors groesser als `0.200 s`
+- maximale Anchor-Abweichung groesser als `0.350 s`
+- Offset-Range der akzeptierten Anchors groesser als `0.500 s`
+
+Das Ziel ist simpel:
+
+- ein unsicheres Mapping soll als klarer Fehler enden
+- nicht als scheinbar brauchbarer `synced`-Eintrag weiter in Analyse und Schnitt rutschen
+
 ## Naechste technische Schritte
 
 1. Residualfehler je Anchor explizit ausgeben und Grenzwerte haerter machen.

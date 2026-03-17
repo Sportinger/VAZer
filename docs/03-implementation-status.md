@@ -43,14 +43,15 @@ Verwendete Dateien:
 - `D:\VAZ_Chaos\Medien\VAZ Chaos HT.MXF`
 - `D:\VAZ_Chaos\Medien\Chaos_Vaz.wav`
 
-Der aktuelle Sync- und Plan-Lauf liefert plausibel:
+Der aktuelle Sync-Lauf liefert fuer die Testdateien:
 
 - Start der Kamera auf der Master-Timeline bei ca. `71.143 s`
 - Modell `source_time = 0.999869857 * master_time - 71.133789`
 - prognostizierte Drift ueber `1h` von ca. `-0.469 s`
-- alle drei MXF-Kameras lassen sich inzwischen in ein gemeinsames `sync_map` bringen
+- `VAZ Chaos Close.MXF` und `VAZ Chaos HT.MXF` bestehen die aktuellen Sync-Quality-Gates
+- `Clip0004.MXF` wird aktuell bewusst als `failed` markiert, weil die akzeptierten Anchor-Messungen intern zu stark streuen
 - die technische Analyse erzeugt ein `analysis_map` mit `382` speech-like Master-Segmenten
-- der signal-aware `cut_plan` erzeugt daraus aktuell `306` Video-Segmente ueber `4568.0 s` Output
+- der signal-aware `cut_plan` arbeitet damit aktuell auf den validierten Kameras weiter
 - der Render-Scaffold fuer diesen Plan wird sauber erzeugt, ein voller ffmpeg-Smoke-Test ist bei langen 4K-H.264-Quellen aber noch bewusst teuer
 
 Das ist noch kein finaler Produktionswert, aber ein belastbarer erster Kern fuer `sync_map -> analysis_map -> cut_plan -> render scaffold`.
@@ -106,7 +107,7 @@ python -m vazer render scaffold --cut-plan .\artifacts\cut_plan.json --output-me
 
 ## Was noch fehlt
 
-- explizite Fehlerschwellen und Quality-Gates
 - manuelle Overrides und Review-Flags im `sync_map`
 - Proxy-/Preview-Pipeline fuer schnellere technische Analyse und Render-Checks
 - echtes `render run` statt nur Scaffold
+- optional ein zweiter Rettungsversuch fuer grenzwertige Sync-Faelle statt sofortigem Hard-Fail

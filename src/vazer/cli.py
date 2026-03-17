@@ -127,6 +127,7 @@ def _build_analysis_options(args: argparse.Namespace) -> AnalysisOptions:
 def _print_probe_summary(report: dict[str, Any]) -> None:
     selected_stream = report["camera"]["selected_stream"]
     mapping = report["mapping"]
+    summary = report["summary"]
     accepted = report["anchors"]["accepted"]
     mean_peak_ratio = None
     if accepted:
@@ -151,7 +152,20 @@ def _print_probe_summary(report: dict[str, Any]) -> None:
     )
     print(f"Accepted anchors: {len(accepted)}/{len(report['anchors']['measurements'])}")
     print(f"Mean peak ratio: {'n/a' if mean_peak_ratio is None else f'{mean_peak_ratio:.3f}'}")
-    print(f"Confidence: {report['summary']['confidence']}")
+    print(f"Confidence: {summary['confidence']}")
+    print(f"Validation: {'passed' if summary['validated'] else 'failed'}")
+    diagnostics = summary.get("diagnostics", {})
+    residual_rmse = diagnostics.get("residual_rmse_seconds")
+    residual_max = diagnostics.get("residual_max_abs_seconds")
+    offset_range = diagnostics.get("accepted_offset_range_seconds")
+    if residual_rmse is not None:
+        print(f"Residual RMS: {residual_rmse:.3f} s")
+    if residual_max is not None:
+        print(f"Residual Max: {residual_max:.3f} s")
+    if offset_range is not None:
+        print(f"Accepted Offset Range: {offset_range:.3f} s")
+    for error in summary.get("errors", []):
+        print(f"Error: {error}")
 
 
 def _print_sync_map_summary(sync_map: dict[str, Any], output_path: Path) -> None:
@@ -241,7 +255,7 @@ def main() -> int:
                 print(json.dumps(report, indent=2))
             else:
                 _print_probe_summary(report)
-            return 0
+            return 0 if report["summary"]["validated"] else 1
 
         if args.sync_command == "map":
             try:

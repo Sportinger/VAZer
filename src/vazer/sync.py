@@ -10,6 +10,9 @@ from .fftools import AudioStreamInfo, MediaInfo, decode_audio, probe_media
 SILENCE_RMS_THRESHOLD = 5e-4
 DUPLICATE_SIMILARITY_THRESHOLD = 0.995
 ALLOWED_MASTER_END_OVERHANG_SECONDS = 60.0
+MAX_ACCEPTED_ANCHOR_RESIDUAL_RMSE_SECONDS = 0.2
+MAX_ACCEPTED_ANCHOR_RESIDUAL_MAX_SECONDS = 0.35
+MAX_ACCEPTED_ANCHOR_OFFSET_RANGE_SECONDS = 0.5
 
 
 @dataclass(slots=True)
@@ -88,6 +91,9 @@ class SyncMapping:
 @dataclass(slots=True)
 class SyncSummary:
     confidence: str
+    validated: bool
+    errors: list[str]
+    diagnostics: dict[str, float | int | None]
     notes: list[str]
 
 
@@ -613,6 +619,98 @@ def _summarize_confidence(anchors: list[AnchorMeasurement], predicted_drift_over
     return "low"
 
 
+def _calculate_sync_diagnostics(
+    anchors: list[AnchorMeasurement],
+    fit_source: list[AnchorMeasurement],
+    coarse_peak_ratio: float | None,
+    speed: float,
+    offset_seconds: float,
+) -> dict[str, float | int | None]:
+    accepted = [anchor for anchor in anchors if anchor.accepted]
+    reference_anchors = fit_source or anchors
+    slope = speed - 1.0
+
+    residuals: list[float] = []
+    for anchor in reference_anchors:
+        predicted = slope * anchor.master_reference_seconds + offset_seconds
+        residuals.append(anchor.source_minus_master_seconds - predicted)
+
+    residual_rmse_seconds = None
+    residual_max_abs_seconds = None
+    if residuals:
+        squared = [residual * residual for residual in residuals]
+        residual_rmse_seconds = float(np.sqrt(np.mean(np.array(squared, dtype=np.float64))))
+        residual_max_abs_seconds = float(max(abs(residual) for residual in residuals))
+
+    accepted_offsets = [anchor.source_minus_master_seconds for anchor in accepted]
+    accepted_offset_range_seconds = None
+    if accepted_offsets:
+        accepted_offset_range_seconds = float(max(accepted_offsets) - min(accepted_offsets))
+
+    mean_accepted_peak_ratio = None
+    if accepted:
+        mean_accepted_peak_ratio = float(
+            sum((anchor.peak_ratio or 1.0) for anchor in accepted) / len(accepted)
+        )
+
+    return {
+        "anchor_count": len(anchors),
+        "accepted_anchor_count": len(accepted),
+        "accepted_anchor_ratio": None if not anchors else float(len(accepted) / len(anchors)),
+        "coarse_peak_ratio": None if coarse_peak_ratio is None else float(coarse_peak_ratio),
+        "mean_accepted_peak_ratio": mean_accepted_peak_ratio,
+        "accepted_offset_range_seconds": accepted_offset_range_seconds,
+        "residual_rmse_seconds": residual_rmse_seconds,
+        "residual_max_abs_seconds": residual_max_abs_seconds,
+    }
+
+
+def _validate_sync_diagnostics(diagnostics: dict[str, float | int | None]) -> list[str]:
+    errors: list[str] = []
+    accepted_anchor_count = int(diagnostics["accepted_anchor_count"] or 0)
+    residual_rmse_seconds = diagnostics["residual_rmse_seconds"]
+    residual_max_abs_seconds = diagnostics["residual_max_abs_seconds"]
+    accepted_offset_range_seconds = diagnostics["accepted_offset_range_seconds"]
+
+    if accepted_anchor_count == 0:
+        errors.append("Sync rejected: no anchor windows passed the peak-ratio acceptance threshold.")
+        return errors
+
+    if accepted_anchor_count < 2:
+        errors.append(
+            "Sync rejected: fewer than 2 accepted anchor windows survived validation, so the mapping is unstable."
+        )
+
+    if (
+        isinstance(residual_rmse_seconds, float)
+        and residual_rmse_seconds > MAX_ACCEPTED_ANCHOR_RESIDUAL_RMSE_SECONDS
+    ):
+        errors.append(
+            "Sync rejected: accepted anchors do not fit a stable line "
+            f"(residual RMS {residual_rmse_seconds:.3f}s > {MAX_ACCEPTED_ANCHOR_RESIDUAL_RMSE_SECONDS:.3f}s)."
+        )
+
+    if (
+        isinstance(residual_max_abs_seconds, float)
+        and residual_max_abs_seconds > MAX_ACCEPTED_ANCHOR_RESIDUAL_MAX_SECONDS
+    ):
+        errors.append(
+            "Sync rejected: at least one accepted anchor deviates too far from the fitted mapping "
+            f"({residual_max_abs_seconds:.3f}s > {MAX_ACCEPTED_ANCHOR_RESIDUAL_MAX_SECONDS:.3f}s)."
+        )
+
+    if (
+        isinstance(accepted_offset_range_seconds, float)
+        and accepted_offset_range_seconds > MAX_ACCEPTED_ANCHOR_OFFSET_RANGE_SECONDS
+    ):
+        errors.append(
+            "Sync rejected: accepted anchor offsets disagree too much across the clip "
+            f"({accepted_offset_range_seconds:.3f}s > {MAX_ACCEPTED_ANCHOR_OFFSET_RANGE_SECONDS:.3f}s)."
+        )
+
+    return errors
+
+
 def _resolve_requested_stream(requested_stream: str, streams: list[StreamInspection]) -> list[StreamInspection]:
     matches = [
         stream
@@ -683,6 +781,14 @@ def analyze_sync(
     camera_starts_at_master_seconds = -offset_seconds / speed
     predicted_drift_over_hour_seconds = slope * 3600.0
     confidence = _summarize_confidence(anchors, predicted_drift_over_hour_seconds)
+    diagnostics = _calculate_sync_diagnostics(
+        anchors,
+        fit_source,
+        best_coarse.peak_ratio,
+        speed,
+        offset_seconds,
+    )
+    errors = _validate_sync_diagnostics(diagnostics)
 
     notes = [
         "Master audio is the canonical project timeline.",
@@ -719,6 +825,9 @@ def analyze_sync(
         ),
         summary=SyncSummary(
             confidence=confidence,
+            validated=not errors,
+            errors=errors,
+            diagnostics=diagnostics,
             notes=notes,
         ),
     )

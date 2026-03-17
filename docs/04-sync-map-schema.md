@@ -10,7 +10,7 @@ Es speichert:
 - die Sync-Optionen des Laufs
 - pro Kamera die gefundene Abbildung auf die Master-Timeline
 - pro Kamera eine kleine Media-Zusammenfassung
-- Anchor-Messungen und Konfidenz
+- Anchor-Messungen, Konfidenz und Quality-Gates
 - auch Fehlerfaelle, damit Batch-Laeufe nicht alles abbrechen
 
 ## Top-Level
@@ -103,7 +103,22 @@ Jeder Kamera-Eintrag hat einen Status:
     "peak_ratio": 1.294713
   },
   "anchors": {},
-  "summary": {}
+  "summary": {
+    "confidence": "high",
+    "validated": true,
+    "errors": [],
+    "diagnostics": {
+      "anchor_count": 6,
+      "accepted_anchor_count": 6,
+      "accepted_anchor_ratio": 1.0,
+      "coarse_peak_ratio": 1.39,
+      "mean_accepted_peak_ratio": 1.23,
+      "accepted_offset_range_seconds": 0.39,
+      "residual_rmse_seconds": 0.12,
+      "residual_max_abs_seconds": 0.26
+    },
+    "notes": []
+  }
 }
 ```
 
@@ -114,9 +129,27 @@ Jeder Kamera-Eintrag hat einen Status:
   "asset_id": "Clip0007",
   "path": "D:\\VAZ_Chaos\\Medien\\Clip0007.MXF",
   "status": "failed",
-  "error": "No active camera audio stream was found for sync."
+  "error": "Sync rejected: accepted anchors do not fit a stable line (residual RMS 0.274s > 0.200s).",
+  "summary": {
+    "confidence": "medium",
+    "validated": false,
+    "errors": [
+      "Sync rejected: accepted anchors do not fit a stable line (residual RMS 0.274s > 0.200s)."
+    ],
+    "diagnostics": {
+      "accepted_anchor_count": 3,
+      "residual_rmse_seconds": 0.274,
+      "residual_max_abs_seconds": 0.418,
+      "accepted_offset_range_seconds": 0.729
+    }
+  }
 }
 ```
+
+Ein `failed`-Eintrag kann also zwei Ursachen haben:
+
+- kein brauchbares Kamera-Audio fuer Sync
+- ein formal berechnetes Mapping, das die Quality-Gates nicht besteht
 
 ## asset_id
 
@@ -139,5 +172,5 @@ python -m vazer sync map --master <master.wav> --camera <cam1> --camera <cam2> -
 
 - noch kein manuelles Override pro Kamera im selben Batch-Lauf
 - noch kein piecewise Sync pro Asset
-- noch keine separaten Quality-Gates auf Basis von Residualfehlern
+- Quality-Gates sind noch bewusst einfach und hart schwellwertbasiert
 - noch keine Review-Notizen oder manuelle Korrekturen im Artefakt

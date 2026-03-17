@@ -67,6 +67,24 @@ def build_sync_map(
         media_info = probe_media(camera_path)
         primary_video = media_info.video_streams[0] if media_info.video_streams else None
         selected_stream = report["camera"]["selected_stream"]
+        if not report["summary"]["validated"]:
+            entries.append(
+                {
+                    "asset_id": asset_id,
+                    "path": camera_path,
+                    "status": "failed",
+                    "error": " ".join(report["summary"]["errors"]),
+                    "selected_stream": {
+                        "map_specifier": selected_stream["map_specifier"],
+                        "absolute_stream_index": selected_stream["absolute_stream_index"],
+                    },
+                    "coarse": report["coarse"],
+                    "anchors": report["anchors"],
+                    "summary": report["summary"],
+                }
+            )
+            continue
+
         entries.append(
             {
                 "asset_id": asset_id,
