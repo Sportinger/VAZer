@@ -93,6 +93,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.setMinimumSize(1120, 720)
 
             central = QWidget()
+            central.setObjectName("rootWidget")
             self.setCentralWidget(central)
             root = QVBoxLayout(central)
             root.setContentsMargins(18, 18, 18, 18)
@@ -100,9 +101,9 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
             hero = QFrame()
             hero.setObjectName("hero")
-            hero_layout = QHBoxLayout(hero)
+            hero_layout = QVBoxLayout(hero)
             hero_layout.setContentsMargins(22, 22, 22, 22)
-            hero_layout.setSpacing(18)
+            hero_layout.setSpacing(16)
             hero_text = QVBoxLayout()
             hero_text.setSpacing(6)
             eyebrow = QLabel("Theater VAZ")
@@ -119,10 +120,10 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             hero_text.addWidget(eyebrow)
             hero_text.addWidget(title)
             hero_text.addWidget(subtitle)
-            hero_text.addStretch(1)
-            hero_layout.addLayout(hero_text, 3)
+            hero_layout.addLayout(hero_text)
 
             self.metrics_frame = QFrame()
+            self.metrics_frame.setObjectName("metricsFrame")
             metrics_layout = QGridLayout(self.metrics_frame)
             metrics_layout.setContentsMargins(0, 0, 0, 0)
             metrics_layout.setHorizontalSpacing(10)
@@ -140,9 +141,9 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 value.setObjectName("metricValue")
                 card_layout.addWidget(label)
                 card_layout.addWidget(value)
-                metrics_layout.addWidget(card, index, 0)
+                metrics_layout.addWidget(card, 0, index)
                 self.metric_labels[metric_name] = value
-            hero_layout.addWidget(self.metrics_frame, 1)
+            hero_layout.addWidget(self.metrics_frame)
             root.addWidget(hero)
 
             toolbar = QHBoxLayout()
@@ -241,16 +242,24 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.setStyleSheet(
                 """
                 QWidget {
-                  background: #101319;
                   color: #f4eee2;
                   font-family: "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
                   font-size: 14px;
                 }
-                QMainWindow { background: #101319; }
+                QMainWindow, QWidget#rootWidget {
+                  background: #101319;
+                }
+                QLabel {
+                  background: transparent;
+                }
                 QFrame#hero, QFrame#panel, QFrame#metricCard, QFrame#dropPanel {
                   background: #171d25;
                   border: 1px solid rgba(255,255,255,0.08);
                   border-radius: 18px;
+                }
+                QFrame#metricsFrame {
+                  background: transparent;
+                  border: 0;
                 }
                 QFrame#dropPanel[dragover="true"] {
                   border: 1px solid #ef6b3c;
@@ -271,6 +280,9 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 QLabel#heroSubtitle, QLabel#workspaceLabel, QLabel#dropSubtitle {
                   color: #b9b2a3;
                   line-height: 1.5;
+                }
+                QLabel#workspaceLabel {
+                  padding-left: 2px;
                 }
                 QLabel#dropTitle, QLabel#panelTitle, QLabel#detailTitle {
                   font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
@@ -311,6 +323,9 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                   border: 1px solid rgba(255,255,255,0.08);
                   border-radius: 14px;
                   padding: 8px;
+                }
+                QListWidget {
+                  min-height: 120px;
                 }
                 QListWidget::item {
                   padding: 10px;
