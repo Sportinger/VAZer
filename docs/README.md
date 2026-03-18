@@ -20,6 +20,7 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [13-ai-draft.md](./13-ai-draft.md): erster echter OpenAI-Draft-Planer fuer kleine Theater-Teilfenster
 - [14-sample-set.md](./14-sample-set.md): gestaffelte 1m/5m-Testsets fuer schnelle End-to-End-Pipeline-Checks
 - [15-ui.md](./15-ui.md): minimaler Browser-Start fuer Drag-and-drop, Fortschritt und Pause/Resume
+- [16-desktop-app.md](./16-desktop-app.md): nativer PySide6-Start fuer lokale Dateien, Jobs und Pause/Resume
 
 ## Naechste Docs
 

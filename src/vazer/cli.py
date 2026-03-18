@@ -15,6 +15,7 @@ from .cut_review import (
     repair_cut_plan,
     write_cut_validation_report,
 )
+from .desktop_app import launch_desktop_app
 from .render import build_render_scaffold, load_cut_plan
 from .sample_set import SampleSetOptions, build_sample_set
 from .sync import SyncOptions, analyze_sync
@@ -323,6 +324,9 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Open the local UI in the default browser after the server starts.",
     )
+
+    desktop_parser = root_subparsers.add_parser("desktop", help="Launch the native desktop app.")
+    desktop_parser.add_argument("--workspace", default=str(Path("out") / "desktop"))
 
     return parser
 
@@ -893,6 +897,12 @@ def main() -> int:
         except Exception as error:  # pragma: no cover - CLI surface
             parser.exit(1, f"VAZer error: {error}\n")
         return 0
+
+    if args.command == "desktop":
+        try:
+            return int(launch_desktop_app(workspace=args.workspace))
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
 
     parser.print_help()
     return 1

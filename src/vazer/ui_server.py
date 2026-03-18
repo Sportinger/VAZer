@@ -261,7 +261,7 @@ class UIState:
         with self._lock:
             jobs = sorted(self._jobs.values(), key=lambda item: item["created_at_utc"], reverse=True)
             projects = sorted(self._projects.values(), key=lambda item: item["created_at_utc"], reverse=True)
-            return {
+            payload = {
                 "schema_version": "vazer.ui_snapshot.v1",
                 "generated_at_utc": _utc_timestamp(),
                 "workspace": str(self.workspace),
@@ -272,6 +272,7 @@ class UIState:
                 "jobs": jobs,
                 "projects": projects,
             }
+        return json.loads(json.dumps(payload))
 
     def create_upload_session(self) -> dict[str, Any]:
         session_id = f"up_{uuid.uuid4().hex[:10]}"
@@ -324,6 +325,62 @@ class UIState:
         artifacts_root.mkdir(parents=True, exist_ok=True)
         shutil.move(str(session_dir), str(inputs_root))
 
+        files = [
+            {
+                "original_path": str(path.relative_to(inputs_root)),
+                "stored_path": str(path),
+                "source_mode": "uploaded_copy",
+            }
+            for path in sorted(inputs_root.rglob("*"))
+            if path.is_file()
+        ]
+        return self._register_project_and_start_job(
+            project_id=project_id,
+            project_name=project_name,
+            project_root=project_root,
+            inputs_path=str(inputs_root),
+            files=files,
+        )
+
+    def create_project_from_paths(self, paths: list[str], name: str | None = None) -> dict[str, Any]:
+        resolved_paths = [Path(path).expanduser().resolve() for path in paths]
+        if not resolved_paths:
+            raise ValueError("At least one file path is required.")
+        missing = [path for path in resolved_paths if not path.is_file()]
+        if missing:
+            raise ValueError(f"One or more files do not exist: {missing[0]}")
+
+        project_id = f"proj_{uuid.uuid4().hex[:10]}"
+        project_name = (name or resolved_paths[0].stem or project_id).strip() or project_id
+        project_root = self.projects_root / project_id
+        project_root.mkdir(parents=True, exist_ok=True)
+        files = [
+            {
+                "original_path": str(path),
+                "stored_path": str(path),
+                "source_mode": "external_reference",
+            }
+            for path in resolved_paths
+        ]
+        return self._register_project_and_start_job(
+            project_id=project_id,
+            project_name=project_name,
+            project_root=project_root,
+            inputs_path=None,
+            files=files,
+        )
+
+    def _register_project_and_start_job(
+        self,
+        *,
+        project_id: str,
+        project_name: str,
+        project_root: Path,
+        inputs_path: str | None,
+        files: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        artifacts_root = project_root / "artifacts"
+        artifacts_root.mkdir(parents=True, exist_ok=True)
         project = {
             "schema_version": "vazer.ui_project.v1",
             "id": project_id,
@@ -331,16 +388,9 @@ class UIState:
             "created_at_utc": _utc_timestamp(),
             "updated_at_utc": _utc_timestamp(),
             "root_path": str(project_root),
-            "inputs_path": str(inputs_root),
+            "inputs_path": inputs_path,
             "artifacts_path": str(artifacts_root),
-            "files": [
-                {
-                    "original_path": str(path.relative_to(inputs_root)),
-                    "stored_path": str(path),
-                }
-                for path in sorted(inputs_root.rglob("*"))
-                if path.is_file()
-            ],
+            "files": files,
             "classification": {},
             "artifacts": {},
             "job_ids": [],
