@@ -4,6 +4,14 @@
 
 Der erste lauffaehige Code liegt jetzt als Python-CLI im Repo.
 
+Update vom 2026-03-18:
+
+- ein erster lokaler Browser-UI-Start ist jetzt vorhanden
+- Drag-and-drop / Dateiauswahl fuer Clips
+- Hintergrundjobs mit Fortschrittsanzeige
+- kooperatives Pause / Resume auf Job-Ebene
+- erstes UI-Zielartefakt ist ein geschriebenes `sync_map.json`
+
 Warum Python fuer diesen Start:
 
 - Audio-Sync, Korrelation und Drift-Fit sind damit deutlich einfacher als in TypeScript
@@ -29,6 +37,7 @@ Aktueller Produktscope:
 - `src/vazer/visual_packet.py`: gezielte Stills plus Transcript-/Signal-Kontext fuer spaetere multimodale AI-Aufrufe
 - `src/vazer/ai_draft.py`: erster echter OpenAI-basierter Draft-Planer fuer kleine Theater-Fenster
 - `src/vazer/sample_set.py`: gestaffelte Testfenster aus echtem Multicam-Material
+- `src/vazer/ui_server.py`: leichter lokaler Web-Server mit Drag-and-drop, Job-Queue und Pause/Resume
 - `src/vazer/render.py`: ffmpeg-Scaffold aus `cut_plan`
 - `src/vazer/transcribe.py`: OpenAI-Transcription nur fuer das Master-Audio
 - `src/vazer/transcript.py`: Loader fuer externe Transcript-Artefakte
@@ -53,6 +62,7 @@ Aktueller Produktscope:
 - ein `visual_packet` mit gezielten Kamera-Stills fuer AI-Planung oder lokale Review-Faelle bauen
 - einen echten `plan ai-draft` OpenAI-Call auf kleinen Teilfenstern ausfuehren
 - ein `sample_set` fuer 1m/5m Pipeline-Tests erzeugen
+- eine minimale Browser-Oberflaeche fuer ingest -> probe -> sync_map mit Job-Fortschritt starten
 
 ## Smoke-Test mit den Beispiel-Dateien
 
@@ -155,10 +165,19 @@ $env:PYTHONPATH='src'
 python -m vazer render scaffold --cut-plan .\artifacts\cut_plan.json --output-media .\out\final.mp4 --out-dir .\artifacts\render
 ```
 
+UI-Start:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer ui serve --open-browser
+```
+
 ## Was noch fehlt
 
 - manuelle Overrides und Review-Flags im `sync_map`
 - Proxy-/Preview-Pipeline fuer schnellere technische Analyse und Render-Checks
 - echtes `render run` statt nur Scaffold
+- direkter lokaler Dateipfad-Import ohne Browser-Upload
+- weitere Pipeline-Stufen im UI ueber `sync_map` hinaus
 - spaeter piecewise Sync fuer Clips, bei denen auch der Rescue-Pfad nicht reicht
 - dichtere CV-Signale wie Face-Presence, Shot-Boundaries und Framing

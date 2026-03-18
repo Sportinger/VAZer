@@ -21,6 +21,7 @@ from .sync import SyncOptions, analyze_sync
 from .sync_map import build_sync_map, write_sync_map
 from .transcribe import TranscriptionOptions, build_master_transcript, write_transcript_artifact
 from .transcript import load_transcript_artifact
+from .ui_server import serve_ui
 from .visual_packet import VisualPacketOptions, build_visual_packet, load_visual_packet, write_visual_packet
 
 
@@ -306,6 +307,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional camera role override as ASSET_ID=totale|close|halbtotale.",
     )
     sample_set_parser.add_argument("--json", action="store_true", help="Print the generated sample_set JSON to stdout.")
+
+    ui_parser = root_subparsers.add_parser("ui", help="Local browser UI for ingest and job control.")
+    ui_subparsers = ui_parser.add_subparsers(dest="ui_command")
+
+    ui_serve_parser = ui_subparsers.add_parser(
+        "serve",
+        help="Start a lightweight local web UI with drag-and-drop, progress and pause/resume.",
+    )
+    ui_serve_parser.add_argument("--host", default="127.0.0.1")
+    ui_serve_parser.add_argument("--port", type=int, default=8765)
+    ui_serve_parser.add_argument("--workspace", default=str(Path("out") / "ui"))
+    ui_serve_parser.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="Open the local UI in the default browser after the server starts.",
+    )
 
     return parser
 
@@ -863,6 +880,18 @@ def main() -> int:
             print(json.dumps(sample_set, indent=2))
         else:
             _print_sample_set_summary(sample_set, Path(args.out_dir))
+        return 0
+
+    if args.command == "ui" and args.ui_command == "serve":
+        try:
+            serve_ui(
+                host=args.host,
+                port=args.port,
+                workspace=args.workspace,
+                open_browser=args.open_browser,
+            )
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
         return 0
 
     parser.print_help()

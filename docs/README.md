@@ -19,6 +19,7 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [12-visual-packet.md](./12-visual-packet.md): gezielte Stills pro Zeitfenster als multimodaler Input fuer spaetere AI-Planung
 - [13-ai-draft.md](./13-ai-draft.md): erster echter OpenAI-Draft-Planer fuer kleine Theater-Teilfenster
 - [14-sample-set.md](./14-sample-set.md): gestaffelte 1m/5m-Testsets fuer schnelle End-to-End-Pipeline-Checks
+- [15-ui.md](./15-ui.md): minimaler Browser-Start fuer Drag-and-drop, Fortschritt und Pause/Resume
 
 ## Naechste Docs
 
