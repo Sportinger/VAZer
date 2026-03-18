@@ -94,6 +94,7 @@ Aktueller Rescue-Pfad:
 - den Kandidaten mit der besten Anchor-Konsistenz waehlen
 
 Die Anchor-Fenster werden dabei nicht mehr nur gleichmaessig verteilt, sondern bevorzugt auf aktive Master-Audio-Bereiche gelegt.
+Bei kurzen Overlaps werden Anchor-Fenster, Spacing und Zielanzahl inzwischen adaptiv verkleinert, damit auch 1-4-Minuten-Testclips nicht an denselben Gates wie 1-3h-Takes scheitern.
 
 Pro Anchor:
 
@@ -114,6 +115,7 @@ Aktuell kommen zusammen:
 - Z-Score-Normalisierung der Fenster
 - GCC-PHAT-Anteil fuer robustere Lag-Schaetzung
 - Energie-/Onset-Huellkurven fuer zusaetzliche coarse Kandidaten und bessere Anchor-Auswahl
+- adaptive Kurzclip-Strategie fuer Anchor-Groesse, Spacing und kontrollierten Single-Anchor-Fallback bei starken Peaks
 
 ## Datenobjekte
 

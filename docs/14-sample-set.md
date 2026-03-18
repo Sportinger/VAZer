@@ -104,3 +104,4 @@ Ein Fenster:
 ## Aktueller Teststand
 
 Der Generator wurde bereits erfolgreich auf dem echten Multicam-Testmaterial mit einem 60s-Fenster ausgefuehrt.
+Nach dem Kurzclip-Sync-Fix laufen diese 60s-Slices auch wieder sauber durch den Sync mit `3/3` erfolgreichen Kameras.

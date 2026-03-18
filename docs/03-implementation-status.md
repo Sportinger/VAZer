@@ -16,6 +16,12 @@ Update vom 2026-03-18:
 - Desktop-Review-Stopp fuer diese Rollen vor dem Sync
 - Desktop-End-to-End-Lauf jetzt bis zum FHD-Render
 
+Update vom 2026-03-19:
+
+- Kurzclip-Sync fuer 1-4-Minuten-Testfenster ist jetzt robuster
+- Anchor-Fenster und Spacing werden bei kurzen Overlaps adaptiv verkleinert
+- starke Kurzclips duerfen notfalls mit genau einem sehr starken Anchor validieren statt pauschal zu scheitern
+
 Warum Python fuer diesen Start:
 
 - Audio-Sync, Korrelation und Drift-Fit sind damit deutlich einfacher als in TypeScript
@@ -56,6 +62,7 @@ Aktueller Produktscope:
 - einen groben Startpunkt auf der Master-Timeline finden
 - mehrere Fine-Sync-Anker messen
 - lineares Zeitmodell `source_time = speed * master_time + offset` fitten
+- kurze 1-4-Minuten-Testclips nicht mehr pauschal am harten 2-Anchor-Gate scheitern lassen
 - mehrere Kamera-Dateien in ein gemeinsames `sync_map.json` schreiben
 - nur die Masterspur per OpenAI in ein `transcript.json` transkribieren
 - Segment- und Wort-Zeitstempel aus `whisper-1` holen
@@ -86,6 +93,7 @@ Verwendete Dateien:
 Der aktuelle Sync-Lauf liefert fuer die Testdateien:
 
 - alle drei MXF-Kameras bestehen jetzt die aktuellen Sync-Quality-Gates
+- 1-Minuten-Sample-Sets syncen jetzt wieder mit `3/3` erfolgreichen Kameras statt am Anchor-Gate zu sterben
 - `Clip0004.MXF` wird ueber den neuen Rescue-Pfad auf ca. `-1062.798 s` zur Master-Timeline gelegt
 - `VAZ Chaos Close.MXF` liegt bei ca. `-153.698 s`
 - `VAZ Chaos HT.MXF` liegt bei ca. `-1046.204 s`

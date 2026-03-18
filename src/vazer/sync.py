@@ -31,6 +31,15 @@ class SyncOptions:
 
 
 @dataclass(slots=True)
+class AnchorStrategy:
+    overlap_duration_seconds: float
+    window_seconds: float
+    min_spacing_seconds: float
+    activity_step_seconds: float
+    target_count: int
+
+
+@dataclass(slots=True)
 class StreamInspection:
     map_specifier: str
     absolute_stream_index: int
@@ -682,8 +691,9 @@ def _build_anchor_reference_times(
     overlap_start_seconds: float,
     overlap_end_seconds: float,
     window_seconds: float,
+    min_spacing_seconds: float,
+    step_seconds: float,
     anchor_count: int,
-    options: SyncOptions,
 ) -> list[float]:
     fallback = _fallback_anchor_reference_times(
         overlap_start_seconds,
@@ -699,8 +709,6 @@ def _build_anchor_reference_times(
     if usable_end <= usable_start:
         return fallback
 
-    step_seconds = max(2.0, options.anchor_activity_step_seconds)
-    min_spacing_seconds = max(options.anchor_min_spacing_seconds, window_seconds * 0.5)
     window_sample_count = max(1, round(window_seconds * activity_rate))
     step_sample_count = max(1, round(step_seconds * activity_rate))
 
@@ -741,6 +749,36 @@ def _build_anchor_reference_times(
     return sorted(selected[:anchor_count]) if selected else fallback
 
 
+def _resolve_anchor_strategy(overlap_duration_seconds: float, options: SyncOptions) -> AnchorStrategy:
+    window_seconds = min(
+        options.anchor_window_seconds,
+        max(12.0, overlap_duration_seconds / 6.0),
+    )
+    min_spacing_seconds = min(
+        options.anchor_min_spacing_seconds,
+        max(6.0, window_seconds * 0.6),
+    )
+    activity_step_seconds = min(
+        options.anchor_activity_step_seconds,
+        max(2.0, window_seconds * 0.5),
+    )
+    usable_duration_seconds = max(0.0, overlap_duration_seconds - window_seconds)
+    target_count = max(
+        1,
+        min(
+            options.anchor_count,
+            int(usable_duration_seconds / max(min_spacing_seconds, window_seconds * 0.8)) + 1,
+        ),
+    )
+    return AnchorStrategy(
+        overlap_duration_seconds=float(overlap_duration_seconds),
+        window_seconds=float(window_seconds),
+        min_spacing_seconds=float(min_spacing_seconds),
+        activity_step_seconds=float(activity_step_seconds),
+        target_count=int(target_count),
+    )
+
+
 def _refine_anchors(
     master: MediaInfo,
     camera: MediaInfo,
@@ -749,13 +787,15 @@ def _refine_anchors(
     options: SyncOptions,
     *,
     master_activity_samples: np.ndarray | None = None,
-) -> list[AnchorMeasurement]:
+) -> tuple[list[AnchorMeasurement], AnchorStrategy]:
     master_duration = _require_duration(master, "Master")
     camera_duration = _require_duration(camera, "Camera")
     overlap_start = max(coarse.camera_starts_at_master_seconds, 0.0)
     overlap_end = min(master_duration, coarse.camera_starts_at_master_seconds + camera_duration)
+    overlap_duration_seconds = overlap_end - overlap_start
+    strategy = _resolve_anchor_strategy(overlap_duration_seconds, options)
 
-    if overlap_end - overlap_start <= options.anchor_window_seconds / 2:
+    if overlap_duration_seconds <= max(6.0, strategy.window_seconds / 2):
         raise ValueError("Not enough overlap to compute anchor measurements.")
 
     measurements: list[AnchorMeasurement] = []
@@ -764,11 +804,12 @@ def _refine_anchors(
         options.activity_rate,
         overlap_start,
         overlap_end,
-        options.anchor_window_seconds,
-        options.anchor_count,
-        options,
+        strategy.window_seconds,
+        strategy.min_spacing_seconds,
+        strategy.activity_step_seconds,
+        strategy.target_count,
     ):
-        master_window_start = max(0.0, reference_seconds - options.anchor_window_seconds / 2)
+        master_window_start = max(0.0, reference_seconds - strategy.window_seconds / 2)
         expected_source_start = master_window_start - coarse.camera_starts_at_master_seconds
         camera_window_start = max(0.0, expected_source_start - options.anchor_search_seconds)
         expected_lag_seconds = camera_window_start - expected_source_start
@@ -776,7 +817,7 @@ def _refine_anchors(
         master_window = decode_audio(
             master.path,
             start_seconds=master_window_start,
-            duration_seconds=options.anchor_window_seconds,
+            duration_seconds=strategy.window_seconds,
             sample_rate=options.fine_rate,
             filters=_analysis_filters(),
         )
@@ -784,7 +825,7 @@ def _refine_anchors(
             camera.path,
             map_specifier=stream.map_specifier,
             start_seconds=camera_window_start,
-            duration_seconds=options.anchor_window_seconds + 2 * options.anchor_search_seconds,
+            duration_seconds=strategy.window_seconds + 2 * options.anchor_search_seconds,
             sample_rate=options.fine_rate,
             filters=_analysis_filters(),
         )
@@ -815,7 +856,7 @@ def _refine_anchors(
             )
         )
 
-    return measurements
+    return measurements, strategy
 
 
 def _summarize_confidence(anchors: list[AnchorMeasurement], predicted_drift_over_hour_seconds: float) -> str:
@@ -839,6 +880,7 @@ def _calculate_sync_diagnostics(
     coarse_peak_ratio: float | None,
     speed: float,
     offset_seconds: float,
+    strategy: AnchorStrategy,
 ) -> dict[str, float | int | None]:
     accepted = [anchor for anchor in anchors if anchor.accepted]
     reference_anchors = fit_source or anchors
@@ -869,6 +911,7 @@ def _calculate_sync_diagnostics(
 
     return {
         "anchor_count": len(anchors),
+        "anchor_target_count": strategy.target_count,
         "accepted_anchor_count": len(accepted),
         "accepted_anchor_ratio": None if not anchors else float(len(accepted) / len(anchors)),
         "coarse_peak_ratio": None if coarse_peak_ratio is None else float(coarse_peak_ratio),
@@ -876,7 +919,27 @@ def _calculate_sync_diagnostics(
         "accepted_offset_range_seconds": accepted_offset_range_seconds,
         "residual_rmse_seconds": residual_rmse_seconds,
         "residual_max_abs_seconds": residual_max_abs_seconds,
+        "overlap_duration_seconds": strategy.overlap_duration_seconds,
+        "anchor_window_seconds_used": strategy.window_seconds,
+        "anchor_min_spacing_seconds_used": strategy.min_spacing_seconds,
     }
+
+
+def _single_anchor_short_clip_is_trustworthy(diagnostics: dict[str, float | int | None]) -> bool:
+    accepted_anchor_count = int(diagnostics["accepted_anchor_count"] or 0)
+    anchor_count = int(diagnostics["anchor_count"] or 0)
+    overlap_duration_seconds = diagnostics["overlap_duration_seconds"]
+    mean_accepted_peak_ratio = float(diagnostics["mean_accepted_peak_ratio"] or 0.0)
+    coarse_peak_ratio = float(diagnostics["coarse_peak_ratio"] or 0.0)
+
+    return (
+        accepted_anchor_count == 1
+        and anchor_count <= 2
+        and isinstance(overlap_duration_seconds, float)
+        and overlap_duration_seconds <= 300.0
+        and mean_accepted_peak_ratio >= 1.3
+        and coarse_peak_ratio >= 1.03
+    )
 
 
 def _validate_sync_diagnostics(diagnostics: dict[str, float | int | None]) -> list[str]:
@@ -890,7 +953,7 @@ def _validate_sync_diagnostics(diagnostics: dict[str, float | int | None]) -> li
         errors.append("Sync rejected: no anchor windows passed the peak-ratio acceptance threshold.")
         return errors
 
-    if accepted_anchor_count < 2:
+    if accepted_anchor_count < 2 and not _single_anchor_short_clip_is_trustworthy(diagnostics):
         errors.append(
             "Sync rejected: fewer than 2 accepted anchor windows survived validation, so the mapping is unstable."
         )
@@ -934,7 +997,7 @@ def _evaluate_candidate(
     *,
     master_activity_samples: np.ndarray | None = None,
 ) -> CandidateEvaluation:
-    anchors = _refine_anchors(
+    anchors, strategy = _refine_anchors(
         master,
         camera,
         stream,
@@ -968,6 +1031,7 @@ def _evaluate_candidate(
         coarse.peak_ratio,
         mapping.speed,
         mapping.offset_seconds,
+        strategy,
     )
     errors = _validate_sync_diagnostics(diagnostics)
     return CandidateEvaluation(
