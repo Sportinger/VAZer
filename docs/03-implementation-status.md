@@ -12,6 +12,8 @@ Update vom 2026-03-18:
 - kooperatives Pause / Resume auf Job-Ebene
 - erstes UI-Zielartefakt ist ein geschriebenes `sync_map.json`
 - dazu jetzt auch ein nativer PySide6-Desktop-Start ohne Browser-Upload
+- AI-Kamerarollen aus einem Mittelframe pro Kamera
+- Desktop-Review-Stopp fuer diese Rollen vor dem Sync
 
 Warum Python fuer diesen Start:
 
@@ -38,6 +40,7 @@ Aktueller Produktscope:
 - `src/vazer/visual_packet.py`: gezielte Stills plus Transcript-/Signal-Kontext fuer spaetere multimodale AI-Aufrufe
 - `src/vazer/ai_draft.py`: erster echter OpenAI-basierter Draft-Planer fuer kleine Theater-Fenster
 - `src/vazer/sample_set.py`: gestaffelte Testfenster aus echtem Multicam-Material
+- `src/vazer/camera_roles.py`: einmalige AI-Zuordnung von `totale` / `halbtotale` / `close` aus Mittelframes
 - `src/vazer/ui_server.py`: leichter lokaler Web-Server mit Drag-and-drop, Job-Queue und Pause/Resume
 - `src/vazer/desktop_app.py`: native Desktop-App fuer lokale Dateien, Projektliste und Jobkontrolle
 - `src/vazer/render.py`: ffmpeg-Scaffold aus `cut_plan`
@@ -66,6 +69,8 @@ Aktueller Produktscope:
 - ein `sample_set` fuer 1m/5m Pipeline-Tests erzeugen
 - eine minimale Browser-Oberflaeche fuer ingest -> probe -> sync_map mit Job-Fortschritt starten
 - eine minimale native Desktop-Oberflaeche fuer denselben ingest -> sync_map Einstieg starten
+- die drei Theater-Kamerarollen in einem OpenAI-Call aus Mittelframes klassifizieren
+- den Desktop-Lauf vor dem Sync anhalten, Rollen anzeigen und per `Weiter` / `Abbrechen` freigeben
 
 ## Smoke-Test mit den Beispiel-Dateien
 
@@ -182,12 +187,20 @@ $env:PYTHONPATH='src'
 python -m vazer desktop
 ```
 
+AI-Kamerarollen:
+
+```powershell
+$env:PYTHONPATH='src'
+python -m vazer analyze roles --sync-map .\artifacts\sync_map.json --out .\artifacts\camera_roles.json --out-dir .\artifacts\camera_roles
+```
+
 ## Was noch fehlt
 
 - manuelle Overrides und Review-Flags im `sync_map`
 - Proxy-/Preview-Pipeline fuer schnellere technische Analyse und Render-Checks
 - echtes `render run` statt nur Scaffold
 - weitere Pipeline-Stufen im UI ueber `sync_map` hinaus
+- sichtbarer Review-/Freigabe-Loop fuer spaetere Transcript-, Analyse- und Draft-Schritte
 - Packaging der Desktop-App zu einer echten `.exe`
 - spaeter piecewise Sync fuer Clips, bei denen auch der Rescue-Pfad nicht reicht
 - dichtere CV-Signale wie Face-Presence, Shot-Boundaries und Framing

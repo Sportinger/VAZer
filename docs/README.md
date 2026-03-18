@@ -21,6 +21,7 @@ Zentraler Ort fuer Produktidee, Architektur, offene Fragen und spaetere Entschei
 - [14-sample-set.md](./14-sample-set.md): gestaffelte 1m/5m-Testsets fuer schnelle End-to-End-Pipeline-Checks
 - [15-ui.md](./15-ui.md): minimaler Browser-Start fuer Drag-and-drop, Fortschritt und Pause/Resume
 - [16-desktop-app.md](./16-desktop-app.md): nativer PySide6-Start fuer lokale Dateien, Jobs und Pause/Resume
+- [17-camera-role-classifier.md](./17-camera-role-classifier.md): einmalige AI-Zuordnung von Totale / Halbtotale / Close aus Mittelframes
 
 ## Naechste Docs
 

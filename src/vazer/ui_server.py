@@ -13,6 +13,7 @@ import uuid
 import webbrowser
 
 from . import __version__
+from .camera_roles import build_camera_role_artifact, infer_camera_role_from_name, write_camera_role_artifact
 from .fftools import MediaInfo, probe_media
 from .sync import SyncOptions, analyze_sync
 from .sync_map import write_sync_map
@@ -178,6 +179,13 @@ def _media_info_to_dict(media_info: MediaInfo) -> dict[str, Any]:
     }
 
 
+def _format_camera_note(role: str | None, message: str) -> str:
+    normalized_role = str(role or "").strip().lower()
+    if normalized_role in {"totale", "halbtotale", "close"}:
+        return f"{normalized_role} | {message}"
+    return message
+
+
 def _build_sync_entry(asset_id: str, camera_path: str, report: dict[str, Any]) -> dict[str, Any]:
     media_info = probe_media(camera_path)
     selected_stream = report["camera"]["selected_stream"]
@@ -212,6 +220,10 @@ def _build_sync_entry(asset_id: str, camera_path: str, report: dict[str, Any]) -
     }
 
 
+class JobCanceledError(RuntimeError):
+    pass
+
+
 class UIState:
     def __init__(self, workspace: Path) -> None:
         self.workspace = workspace.resolve()
@@ -242,7 +254,7 @@ class UIState:
         for job in payload.get("jobs", []) if isinstance(payload.get("jobs"), list) else []:
             if not isinstance(job, dict) or not isinstance(job.get("id"), str):
                 continue
-            if job.get("status") in {"running", "paused", "pause_requested"}:
+            if job.get("status") in {"running", "paused", "pause_requested", "review_required"}:
                 job["status"] = "failed"
                 job["message"] = "Server restart interrupted the previous background job."
                 job["stage_label"] = "unterbrochen"
@@ -330,6 +342,9 @@ class UIState:
                 "original_path": str(path.relative_to(inputs_root)),
                 "stored_path": str(path),
                 "source_mode": "uploaded_copy",
+                "display_name": path.name,
+                "ui_status": "queued",
+                "ui_note": "Waiting to start.",
             }
             for path in sorted(inputs_root.rglob("*"))
             if path.is_file()
@@ -359,6 +374,9 @@ class UIState:
                 "original_path": str(path),
                 "stored_path": str(path),
                 "source_mode": "external_reference",
+                "display_name": path.name,
+                "ui_status": "queued",
+                "ui_note": "Waiting to start.",
             }
             for path in resolved_paths
         ]
@@ -423,10 +441,12 @@ class UIState:
             self._runtimes[job_id] = {
                 "condition": threading.Condition(),
                 "pause_requested": False,
+                "awaiting_confirmation": False,
+                "cancel_requested": False,
             }
             self._persist_state()
 
-        thread = threading.Thread(target=self._run_project_job, args=(project_id, job_id), daemon=True)
+        thread = threading.Thread(target=self._run_project_job_v2, args=(project_id, job_id), daemon=True)
         self._runtimes[job_id]["thread"] = thread
         thread.start()
         return {
@@ -467,10 +487,73 @@ class UIState:
             condition.notify_all()
         return {"job_id": job_id, "status": "running"}
 
+    def confirm_job(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            runtime = self._runtimes.get(job_id)
+            job = self._jobs.get(job_id)
+            if runtime is None or job is None:
+                raise ValueError("Unknown job.")
+            runtime["awaiting_confirmation"] = False
+            if job.get("status") == "review_required":
+                job["status"] = "running"
+                job["stage_label"] = "laeuft"
+                job["message"] = "Review bestaetigt. Job laeuft weiter."
+                job["updated_at_utc"] = _utc_timestamp()
+                self._persist_state()
+            condition = runtime["condition"]
+        with condition:
+            condition.notify_all()
+        return {"job_id": job_id, "status": self._jobs[job_id]["status"]}
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            runtime = self._runtimes.get(job_id)
+            job = self._jobs.get(job_id)
+            if runtime is None or job is None:
+                raise ValueError("Unknown job.")
+            runtime["cancel_requested"] = True
+            runtime["awaiting_confirmation"] = False
+            runtime["pause_requested"] = False
+            job["status"] = "canceled"
+            job["stage"] = "canceled"
+            job["stage_label"] = "Abgebrochen"
+            job["message"] = "Job wurde vom User abgebrochen."
+            job["updated_at_utc"] = _utc_timestamp()
+            self._persist_state()
+            condition = runtime["condition"]
+        with condition:
+            condition.notify_all()
+        return {"job_id": job_id, "status": "canceled"}
+
     def _update_project(self, project_id: str, **changes: Any) -> None:
         with self._lock:
             project = self._projects[project_id]
             project.update(changes)
+            project["updated_at_utc"] = _utc_timestamp()
+            self._persist_state()
+
+    def _update_project_file(
+        self,
+        project_id: str,
+        stored_path: str,
+        *,
+        ui_status: str | None = None,
+        ui_note: str | None = None,
+        extra_fields: dict[str, Any] | None = None,
+    ) -> None:
+        with self._lock:
+            project = self._projects[project_id]
+            files = project["files"]
+            for file_info in files:
+                if file_info.get("stored_path") != stored_path:
+                    continue
+                if ui_status is not None:
+                    file_info["ui_status"] = ui_status
+                if ui_note is not None:
+                    file_info["ui_note"] = ui_note
+                if extra_fields:
+                    file_info.update(extra_fields)
+                break
             project["updated_at_utc"] = _utc_timestamp()
             self._persist_state()
 
@@ -509,6 +592,27 @@ class UIState:
                     stage_label="läuft",
                     message="Job läuft weiter.",
                 )
+
+    def _raise_if_canceled(self, job_id: str) -> None:
+        runtime = self._runtimes[job_id]
+        if runtime.get("cancel_requested"):
+            raise JobCanceledError("Job was canceled by the user.")
+
+    def _wait_for_role_review(self, job_id: str) -> None:
+        runtime = self._runtimes[job_id]
+        condition: threading.Condition = runtime["condition"]
+        with condition:
+            runtime["awaiting_confirmation"] = True
+            self._update_job(
+                job_id,
+                status="review_required",
+                stage="role_review",
+                stage_label="Rollen pruefen",
+                message="Pruefe die AI-Rollen und klicke Weiter oder Abbrechen.",
+            )
+            while runtime["awaiting_confirmation"] and not runtime["cancel_requested"]:
+                condition.wait(timeout=0.5)
+        self._raise_if_canceled(job_id)
 
     def _classify_files(self, files: list[dict[str, Any]]) -> dict[str, Any]:
         audio_only: list[dict[str, Any]] = []
@@ -711,12 +815,412 @@ class UIState:
                     "master_asset": classification["master_asset"],
                 },
             )
+        except JobCanceledError:
+            return
+        except JobCanceledError:
+            return
         except Exception as error:
             self._update_job(
                 job_id,
                 status="failed",
                 stage="failed",
                 stage_label="Fehler",
+                message=str(error),
+            )
+
+    def _classify_files_v2(self, files: list[dict[str, Any]]) -> dict[str, Any]:
+        audio_only: list[dict[str, Any]] = []
+        video_files: list[dict[str, Any]] = []
+        unsupported: list[dict[str, Any]] = []
+
+        for file_info in files:
+            probe = file_info.get("probe") or {}
+            audio_count = int(probe.get("audio_stream_count") or 0)
+            video_count = int(probe.get("video_stream_count") or 0)
+            if video_count > 0:
+                video_files.append(file_info)
+            elif audio_count > 0:
+                audio_only.append(file_info)
+            else:
+                unsupported.append(file_info)
+
+        warnings: list[str] = []
+        master_file: dict[str, Any] | None = None
+        if len(audio_only) == 1:
+            master_file = audio_only[0]
+        elif len(audio_only) > 1:
+            master_file = max(audio_only, key=lambda item: float((item.get("probe") or {}).get("duration_seconds") or 0.0))
+            warnings.append("Multiple audio-only files detected. The longest one was chosen as master.")
+        else:
+            warnings.append("No unambiguous audio-only master file was detected.")
+
+        return {
+            "master_asset": None if master_file is None else master_file["original_path"],
+            "master_path": None if master_file is None else master_file["stored_path"],
+            "master_stored_path": None if master_file is None else master_file["stored_path"],
+            "camera_assets": [item["original_path"] for item in video_files],
+            "camera_paths": [item["stored_path"] for item in video_files],
+            "camera_count": len(video_files),
+            "unsupported_count": len(unsupported),
+            "warnings": warnings,
+        }
+
+    def _run_project_job_v2(self, project_id: str, job_id: str) -> None:
+        try:
+            with self._lock:
+                project = self._projects[project_id]
+                files = list(project["files"])
+            total_files = max(1, len(files))
+            artifacts_root = Path(self._projects[project_id]["artifacts_path"])
+
+            self._update_job(
+                job_id,
+                status="running",
+                stage="probing",
+                stage_label="Probing files",
+                message="Inspecting dropped files with ffprobe.",
+                progress_percent=2.0,
+            )
+
+            for index, file_info in enumerate(files, start=1):
+                self._wait_if_paused(job_id)
+                self._raise_if_canceled(job_id)
+                self._update_project_file(
+                    project_id,
+                    file_info["stored_path"],
+                    ui_status="probing",
+                    ui_note=f"Inspecting file {index}/{total_files}",
+                )
+                self._update_job(
+                    job_id,
+                    stage="probing",
+                    stage_label="Probing files",
+                    message=f"Inspecting {file_info['display_name']} ({index}/{total_files})",
+                    progress_percent=2.0 + 28.0 * ((index - 1) / total_files),
+                )
+                media_info = probe_media(file_info["stored_path"])
+                file_info["probe"] = _media_info_to_dict(media_info)
+                file_info["ui_status"] = "ready"
+                file_info["ui_note"] = "Media info loaded."
+                self._update_project(project_id, files=files)
+                self._write_project_manifest(project_id)
+
+            classification = self._classify_files_v2(files)
+            master_stored_path = classification.get("master_stored_path")
+            camera_path_list = list(classification.get("camera_paths") or [])
+            camera_paths = set(camera_path_list)
+            asset_ids = _derive_asset_ids(camera_path_list)
+            asset_id_by_path = dict(zip(camera_path_list, asset_ids, strict=True))
+            classification["camera_asset_ids"] = asset_ids
+            classification["camera_roles"] = {}
+            classification["camera_role_source"] = None
+            for file_info in files:
+                stored_path = file_info["stored_path"]
+                if stored_path == master_stored_path:
+                    file_info["ui_status"] = "master"
+                    file_info["ui_note"] = "Using this file as master audio."
+                elif stored_path in camera_paths:
+                    asset_id = asset_id_by_path[stored_path]
+                    file_info["asset_id"] = asset_id
+                    file_info["ui_status"] = "camera"
+                    file_info["ui_note"] = "Camera candidate ready for role check."
+                else:
+                    file_info["ui_status"] = "ignored"
+                    file_info["ui_note"] = "No usable audio/video role detected."
+
+            self._update_project(project_id, files=files, classification=classification)
+            self._write_project_manifest(project_id)
+            self._update_job(
+                job_id,
+                stage="classified",
+                stage_label="Files classified",
+                message="Master and camera candidates were identified.",
+                progress_percent=35.0,
+                details={
+                    "file_count": len(files),
+                    "camera_count": classification["camera_count"],
+                    "master_asset": classification["master_asset"],
+                },
+            )
+
+            if camera_path_list:
+                self._wait_if_paused(job_id)
+                self._raise_if_canceled(job_id)
+                self._update_job(
+                    job_id,
+                    stage="roles",
+                    stage_label="Camera roles",
+                    message="Classifying middle frames into totale / halbtotale / close.",
+                    progress_percent=40.0,
+                )
+                for index, camera_path in enumerate(camera_path_list, start=1):
+                    asset_id = asset_id_by_path[camera_path]
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status="role_check",
+                        ui_note=f"Preparing AI role check {index}/{len(camera_path_list)}",
+                        extra_fields={"asset_id": asset_id},
+                    )
+
+                camera_role_path = artifacts_root / "camera_roles.json"
+                role_frame_dir = artifacts_root / "camera_roles"
+                try:
+                    camera_role_artifact = build_camera_role_artifact(
+                        [
+                            {
+                                "asset_id": asset_id_by_path[camera_path],
+                                "path": camera_path,
+                                "display_name": Path(camera_path).name,
+                            }
+                            for camera_path in camera_path_list
+                        ],
+                        output_dir=str(role_frame_dir),
+                    )
+                except Exception as error:
+                    role_assignments = [
+                        {
+                            "asset_id": asset_id_by_path[camera_path],
+                            "path": camera_path,
+                            "display_name": Path(camera_path).name,
+                            "duration_seconds": (probe_media(camera_path).duration_seconds or 0.0),
+                            "middle_seconds": (probe_media(camera_path).duration_seconds or 0.0) / 2.0,
+                            "frame_path": None,
+                            "image_width": None,
+                            "image_height": None,
+                            "role": infer_camera_role_from_name(asset_id_by_path[camera_path], camera_path),
+                            "confidence": "low",
+                            "reason": "Fallback from filename hints after AI role classification failed.",
+                        }
+                        for camera_path in camera_path_list
+                    ]
+                    camera_role_artifact = {
+                        "schema_version": "vazer.camera_roles.v1",
+                        "generated_at_utc": _utc_timestamp(),
+                        "tool": {
+                            "name": "vazer",
+                            "version": __version__,
+                        },
+                        "provider": {
+                            "name": "fallback",
+                            "model": None,
+                        },
+                        "summary": {
+                            "asset_count": len(role_assignments),
+                            "role_counts": {
+                                role: sum(1 for assignment in role_assignments if assignment["role"] == role)
+                                for role in ("close", "halbtotale", "totale")
+                            },
+                            "summary_text": "Filename fallback was used because AI role classification failed.",
+                        },
+                        "assignments": role_assignments,
+                        "warning": str(error),
+                    }
+                    classification.setdefault("warnings", []).append(
+                        f"AI camera role classification failed. Fell back to filename hints: {error}"
+                    )
+
+                write_camera_role_artifact(camera_role_artifact, str(camera_role_path))
+                classification["camera_roles"] = {
+                    assignment["asset_id"]: assignment["role"]
+                    for assignment in camera_role_artifact["assignments"]
+                }
+                classification["camera_role_source"] = (
+                    "ai_middle_frame"
+                    if camera_role_artifact.get("provider", {}).get("name") == "openai"
+                    else "filename_fallback"
+                )
+                self._update_project(
+                    project_id,
+                    files=files,
+                    classification=classification,
+                    artifacts={
+                        **self._projects[project_id]["artifacts"],
+                        "camera_roles_path": str(camera_role_path),
+                    },
+                )
+                self._write_project_manifest(project_id)
+                for camera_path in camera_path_list:
+                    asset_id = asset_id_by_path[camera_path]
+                    role = classification["camera_roles"].get(asset_id)
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status="camera",
+                        ui_note=_format_camera_note(role, "Camera candidate ready for sync."),
+                        extra_fields={"asset_id": asset_id, "camera_role": role},
+                    )
+                self._update_job(
+                    job_id,
+                    stage="roles",
+                    stage_label="Camera roles",
+                    message="Camera roles assigned.",
+                    progress_percent=45.0,
+                )
+                self._wait_for_role_review(job_id)
+                self._update_job(
+                    job_id,
+                    status="running",
+                    stage="roles",
+                    stage_label="Camera roles",
+                    message="Role review confirmed. Continuing with audio sync.",
+                    progress_percent=46.0,
+                )
+
+            master_path = classification.get("master_path")
+            if not master_path or not camera_path_list:
+                self._update_job(
+                    job_id,
+                    status="needs_attention",
+                    stage="classified",
+                    stage_label="Needs attention",
+                    message="Master or camera files could not be identified cleanly.",
+                    progress_percent=100.0,
+                )
+                return
+
+            sync_options = SyncOptions()
+            entries: list[dict[str, Any]] = []
+            master_summary: dict[str, Any] | None = None
+            partial_path = artifacts_root / "sync_map.partial.json"
+
+            for index, camera_path in enumerate(camera_path_list, start=1):
+                self._wait_if_paused(job_id)
+                self._raise_if_canceled(job_id)
+                asset_id = asset_id_by_path[camera_path]
+                role = classification["camera_roles"].get(asset_id)
+                self._update_project_file(
+                    project_id,
+                    camera_path,
+                    ui_status="syncing",
+                    ui_note=_format_camera_note(role, f"Syncing camera {index}/{len(camera_path_list)}"),
+                    extra_fields={"asset_id": asset_id},
+                )
+                self._update_job(
+                    job_id,
+                    stage="syncing",
+                    stage_label="Audio sync",
+                    message=f"Syncing {Path(camera_path).name} ({index}/{len(camera_path_list)})",
+                    progress_percent=45.0 + 45.0 * ((index - 1) / len(camera_path_list)),
+                )
+                try:
+                    report = analyze_sync(master_path, camera_path, options=sync_options)
+                except Exception as error:
+                    entries.append(
+                        {
+                            "asset_id": asset_id,
+                            "path": camera_path,
+                            "status": "failed",
+                            "error": str(error),
+                        }
+                    )
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status="failed",
+                        ui_note=_format_camera_note(role, f"Sync failed: {error}"),
+                    )
+                else:
+                    if master_summary is None:
+                        master_summary = report["master"]
+                    sync_entry = _build_sync_entry(asset_id, camera_path, report)
+                    entries.append(sync_entry)
+                    entry_status = "synced" if sync_entry["status"] == "synced" else "failed"
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status=entry_status,
+                        ui_note=_format_camera_note(
+                            role,
+                            (
+                                "Audio sync locked."
+                                if entry_status == "synced"
+                                else str(sync_entry.get("error") or "Sync failed.")
+                            ),
+                        ),
+                        extra_fields={"camera_role": role},
+                    )
+
+                partial_sync_map = {
+                    "schema_version": "vazer.sync_map.v1",
+                    "generated_at_utc": _utc_timestamp(),
+                    "tool": {
+                        "name": "vazer",
+                        "version": __version__,
+                    },
+                    "master": master_summary
+                    or {
+                        "path": master_path,
+                        "duration_seconds": None,
+                        "format_name": None,
+                    },
+                    "options": {
+                        "coarse_rate": sync_options.coarse_rate,
+                        "fine_rate": sync_options.fine_rate,
+                        "envelope_bin_seconds": sync_options.envelope_bin_seconds,
+                        "activity_rate": sync_options.activity_rate,
+                        "activity_window_seconds": sync_options.activity_window_seconds,
+                        "anchor_count": sync_options.anchor_count,
+                        "anchor_window_seconds": sync_options.anchor_window_seconds,
+                        "anchor_search_seconds": sync_options.anchor_search_seconds,
+                        "coarse_candidate_limit": sync_options.coarse_candidate_limit,
+                        "anchor_activity_step_seconds": sync_options.anchor_activity_step_seconds,
+                        "anchor_min_spacing_seconds": sync_options.anchor_min_spacing_seconds,
+                    },
+                    "entries": entries,
+                    "summary": {
+                        "total": len(entries),
+                        "synced": sum(1 for entry in entries if entry["status"] == "synced"),
+                        "failed": sum(1 for entry in entries if entry["status"] == "failed"),
+                    },
+                }
+                write_sync_map(partial_sync_map, str(partial_path))
+                self._update_project(
+                    project_id,
+                    artifacts={
+                        **self._projects[project_id]["artifacts"],
+                        "partial_sync_map_path": str(partial_path),
+                    },
+                )
+                self._write_project_manifest(project_id)
+
+            final_sync_map = json.loads(partial_path.read_text(encoding="utf-8-sig"))
+            sync_map_path = artifacts_root / "sync_map.json"
+            write_sync_map(final_sync_map, str(sync_map_path))
+            self._update_project(
+                project_id,
+                artifacts={
+                    **self._projects[project_id]["artifacts"],
+                    "sync_map_path": str(sync_map_path),
+                },
+            )
+            self._write_project_manifest(project_id)
+
+            self._update_job(
+                job_id,
+                status="completed" if final_sync_map["summary"]["synced"] > 0 else "failed",
+                stage="completed",
+                stage_label="Done",
+                message=(
+                    f"sync_map written. "
+                    f"{final_sync_map['summary']['synced']} synced, {final_sync_map['summary']['failed']} failed."
+                ),
+                progress_percent=100.0,
+                artifacts={
+                    "sync_map_path": str(sync_map_path),
+                },
+                details={
+                    "file_count": len(files),
+                    "camera_count": classification["camera_count"],
+                    "master_asset": classification["master_asset"],
+                },
+            )
+        except Exception as error:
+            self._update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                stage_label="Error",
                 message=str(error),
             )
 
@@ -807,6 +1311,20 @@ def create_ui_handler(app_state: UIState) -> type[BaseHTTPRequestHandler]:
                     if len(parts) != 4:
                         raise ValueError("Invalid resume route.")
                     _json_response(self, 200, app_state.resume_job(parts[2]))
+                    return
+
+                if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/confirm"):
+                    parts = [part for part in parsed.path.split("/") if part]
+                    if len(parts) != 4:
+                        raise ValueError("Invalid confirm route.")
+                    _json_response(self, 200, app_state.confirm_job(parts[2]))
+                    return
+
+                if parsed.path.startswith("/api/jobs/") and parsed.path.endswith("/cancel"):
+                    parts = [part for part in parsed.path.split("/") if part]
+                    if len(parts) != 4:
+                        raise ValueError("Invalid cancel route.")
+                    _json_response(self, 200, app_state.cancel_job(parts[2]))
                     return
             except Exception as error:
                 _json_response(self, 400, {"error": str(error)})

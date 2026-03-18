@@ -1,234 +1,193 @@
 from __future__ import annotations
 
+from hashlib import sha1
+import json
 from pathlib import Path
+import re
+from typing import Any
+
+
+def _slugify(value: str) -> str:
+    lowered = value.lower()
+    lowered = re.sub(r"[^a-z0-9]+", "-", lowered)
+    lowered = lowered.strip("-")
+    return lowered or "asset"
 
 
 def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> int:
     try:
-        from PySide6.QtCore import QMimeData, Qt, QTimer, Signal
-        from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
+        import cv2
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtGui import QDragEnterEvent, QDropEvent, QImage, QPixmap
         from PySide6.QtWidgets import (
             QApplication,
             QFileDialog,
             QFrame,
-            QGridLayout,
             QHBoxLayout,
             QLabel,
             QListWidget,
             QListWidgetItem,
             QMainWindow,
             QMessageBox,
-            QPlainTextEdit,
             QProgressBar,
             QPushButton,
             QSplitter,
-            QStatusBar,
             QVBoxLayout,
             QWidget,
         )
     except ModuleNotFoundError as error:  # pragma: no cover - runtime dependency guard
         raise ValueError("PySide6 is not installed. Install project dependencies first.") from error
 
+    from .fftools import probe_media
     from .ui_server import UIState
-
-    class DropPanel(QFrame):
-        files_dropped = Signal(list)
-        clicked = Signal()
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.setAcceptDrops(True)
-            self.setObjectName("dropPanel")
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(28, 28, 28, 28)
-            layout.setSpacing(8)
-
-            title = QLabel("Clips direkt hier hineinziehen")
-            title.setObjectName("dropTitle")
-            subtitle = QLabel(
-                "Die Desktop-App nimmt lokale Dateien direkt vom Dateisystem. "
-                "Kein Browser-Upload, kein Umweg."
-            )
-            subtitle.setObjectName("dropSubtitle")
-            subtitle.setWordWrap(True)
-            layout.addWidget(title)
-            layout.addWidget(subtitle)
-
-        def mousePressEvent(self, event) -> None:  # type: ignore[override]
-            if event.button() == Qt.MouseButton.LeftButton:
-                self.clicked.emit()
-            super().mousePressEvent(event)
-
-        def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
-            if _mime_has_local_urls(event.mimeData()):
-                event.acceptProposedAction()
-                self.setProperty("dragover", True)
-                self.style().polish(self)
-            else:
-                event.ignore()
-
-        def dragLeaveEvent(self, event) -> None:  # type: ignore[override]
-            self.setProperty("dragover", False)
-            self.style().polish(self)
-            super().dragLeaveEvent(event)
-
-        def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
-            self.setProperty("dragover", False)
-            self.style().polish(self)
-            paths = _paths_from_mime(event.mimeData())
-            if paths:
-                self.files_dropped.emit(paths)
-                event.acceptProposedAction()
-            else:
-                event.ignore()
 
     class MainWindow(QMainWindow):
         def __init__(self, app_state: UIState) -> None:
             super().__init__()
             self.app_state = app_state
-            self.snapshot: dict[str, object] = {}
+            self.snapshot: dict[str, Any] = {}
+            self.staged_files: list[dict[str, Any]] = []
+            self.active_project_id: str | None = None
+            self.active_job_id: str | None = None
+            self.preview_cache_dir = Path(workspace).resolve() / "preview_cache"
+            self.preview_cache_dir.mkdir(parents=True, exist_ok=True)
+            self.media_cache: dict[str, Any] = {}
+            self.current_preview_pixmap: QPixmap | None = None
+            self.current_preview_key: str | None = None
+
             self.setWindowTitle("VAZer")
-            self.resize(1360, 860)
-            self.setMinimumSize(1120, 720)
+            self.resize(1280, 820)
+            self.setMinimumSize(1000, 680)
+            self.setAcceptDrops(True)
 
-            central = QWidget()
-            central.setObjectName("rootWidget")
-            self.setCentralWidget(central)
-            root = QVBoxLayout(central)
-            root.setContentsMargins(18, 18, 18, 18)
-            root.setSpacing(16)
+            root = QWidget()
+            root.setObjectName("rootWidget")
+            self.setCentralWidget(root)
+            layout = QVBoxLayout(root)
+            layout.setContentsMargins(18, 18, 18, 18)
+            layout.setSpacing(14)
 
-            hero = QFrame()
-            hero.setObjectName("hero")
-            hero_layout = QVBoxLayout(hero)
-            hero_layout.setContentsMargins(22, 22, 22, 22)
-            hero_layout.setSpacing(16)
-            hero_text = QVBoxLayout()
-            hero_text.setSpacing(6)
-            eyebrow = QLabel("Theater VAZ")
+            header = QFrame()
+            header.setObjectName("header")
+            header_layout = QVBoxLayout(header)
+            header_layout.setContentsMargins(20, 18, 20, 18)
+            header_layout.setSpacing(6)
+            eyebrow = QLabel("THEATER VAZ")
             eyebrow.setObjectName("eyebrow")
-            title = QLabel("Multicam-Mitschnitt lokal laden und Jobs kontrollieren")
-            title.setObjectName("heroTitle")
-            title.setWordWrap(True)
+            title = QLabel("Dateien reinziehen. Datei ansehen. Dann VAZ.")
+            title.setObjectName("title")
             subtitle = QLabel(
-                "Minimaler Desktop-Start fuer den lokalen VAZer-Workflow: "
-                "Dateien referenzieren, Job sehen, Pause und Resume ohne Browser."
+                "Drag-and-drop funktioniert ueber das ganze Fenster. "
+                "Jeder Import sammelt Dateien fuer genau einen Lauf."
             )
-            subtitle.setObjectName("heroSubtitle")
+            subtitle.setObjectName("subtitle")
             subtitle.setWordWrap(True)
-            hero_text.addWidget(eyebrow)
-            hero_text.addWidget(title)
-            hero_text.addWidget(subtitle)
-            hero_layout.addLayout(hero_text)
+            header_layout.addWidget(eyebrow)
+            header_layout.addWidget(title)
+            header_layout.addWidget(subtitle)
+            layout.addWidget(header)
 
-            self.metrics_frame = QFrame()
-            self.metrics_frame.setObjectName("metricsFrame")
-            metrics_layout = QGridLayout(self.metrics_frame)
-            metrics_layout.setContentsMargins(0, 0, 0, 0)
-            metrics_layout.setHorizontalSpacing(10)
-            metrics_layout.setVerticalSpacing(10)
-            self.metric_labels: dict[str, QLabel] = {}
-            for index, metric_name in enumerate(("Projekte", "Aktiv", "Fertig")):
-                card = QFrame()
-                card.setObjectName("metricCard")
-                card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(14, 12, 14, 12)
-                card_layout.setSpacing(6)
-                label = QLabel(metric_name)
-                label.setObjectName("metricLabel")
-                value = QLabel("0")
-                value.setObjectName("metricValue")
-                card_layout.addWidget(label)
-                card_layout.addWidget(value)
-                metrics_layout.addWidget(card, 0, index)
-                self.metric_labels[metric_name] = value
-            hero_layout.addWidget(self.metrics_frame)
-            root.addWidget(hero)
-
-            toolbar = QHBoxLayout()
-            toolbar.setSpacing(10)
-            self.workspace_label = QLabel(str(app_state.workspace))
-            self.workspace_label.setObjectName("workspaceLabel")
-            self.add_button = QPushButton("Dateien waehlen")
-            self.add_button.clicked.connect(self.pick_files)
-            self.refresh_button = QPushButton("Aktualisieren")
-            self.refresh_button.setProperty("secondary", True)
-            self.refresh_button.clicked.connect(self.refresh_state)
-            toolbar.addWidget(self.workspace_label, 1)
-            toolbar.addWidget(self.refresh_button)
-            toolbar.addWidget(self.add_button)
-            root.addLayout(toolbar)
-
-            self.drop_panel = DropPanel()
-            self.drop_panel.files_dropped.connect(self.import_paths)
-            self.drop_panel.clicked.connect(self.pick_files)
-            root.addWidget(self.drop_panel)
+            hint = QLabel("Droppe Dateien oder einen ganzen Ordner irgendwo in dieses Fenster.")
+            hint.setObjectName("hint")
+            layout.addWidget(hint)
 
             splitter = QSplitter(Qt.Orientation.Horizontal)
-            root.addWidget(splitter, 1)
+            layout.addWidget(splitter, 1)
 
-            jobs_panel = QFrame()
-            jobs_panel.setObjectName("panel")
-            jobs_layout = QVBoxLayout(jobs_panel)
-            jobs_layout.setContentsMargins(18, 18, 18, 18)
-            jobs_layout.setSpacing(14)
-            jobs_header = QLabel("Jobs")
-            jobs_header.setObjectName("panelTitle")
-            jobs_layout.addWidget(jobs_header)
-            self.jobs_list = QListWidget()
-            self.jobs_list.currentItemChanged.connect(self.on_job_selection_changed)
-            jobs_layout.addWidget(self.jobs_list, 1)
-            self.job_progress = QProgressBar()
-            self.job_progress.setRange(0, 100)
-            jobs_layout.addWidget(self.job_progress)
-            self.job_stage = QLabel("Kein Job gewaehlt.")
-            self.job_stage.setObjectName("detailTitle")
-            jobs_layout.addWidget(self.job_stage)
-            self.job_details = QPlainTextEdit()
-            self.job_details.setReadOnly(True)
-            self.job_details.setMinimumHeight(180)
-            jobs_layout.addWidget(self.job_details)
-            job_actions = QHBoxLayout()
-            self.pause_button = QPushButton("Pause")
-            self.pause_button.setProperty("secondary", True)
-            self.pause_button.clicked.connect(self.pause_selected_job)
-            self.resume_button = QPushButton("Weiter")
-            self.resume_button.clicked.connect(self.resume_selected_job)
-            job_actions.addWidget(self.pause_button)
-            job_actions.addWidget(self.resume_button)
-            job_actions.addStretch(1)
-            jobs_layout.addLayout(job_actions)
-            splitter.addWidget(jobs_panel)
+            list_panel = QFrame()
+            list_panel.setObjectName("panel")
+            list_layout = QVBoxLayout(list_panel)
+            list_layout.setContentsMargins(16, 16, 16, 16)
+            list_layout.setSpacing(10)
+            list_title = QLabel("Dateien")
+            list_title.setObjectName("panelTitle")
+            list_layout.addWidget(list_title)
+            self.file_list = QListWidget()
+            self.file_list.currentItemChanged.connect(self.on_file_selection_changed)
+            list_layout.addWidget(self.file_list, 1)
+            self.file_meta = QLabel("Noch keine Dateien geladen.")
+            self.file_meta.setObjectName("meta")
+            self.file_meta.setWordWrap(True)
+            list_layout.addWidget(self.file_meta)
+            splitter.addWidget(list_panel)
 
-            projects_panel = QFrame()
-            projects_panel.setObjectName("panel")
-            projects_layout = QVBoxLayout(projects_panel)
-            projects_layout.setContentsMargins(18, 18, 18, 18)
-            projects_layout.setSpacing(14)
-            projects_header = QLabel("Projekte")
-            projects_header.setObjectName("panelTitle")
-            projects_layout.addWidget(projects_header)
-            self.projects_list = QListWidget()
-            self.projects_list.currentItemChanged.connect(self.on_project_selection_changed)
-            projects_layout.addWidget(self.projects_list, 1)
-            self.project_title = QLabel("Kein Projekt gewaehlt.")
-            self.project_title.setObjectName("detailTitle")
-            projects_layout.addWidget(self.project_title)
-            self.project_details = QPlainTextEdit()
-            self.project_details.setReadOnly(True)
-            self.project_details.setMinimumHeight(220)
-            projects_layout.addWidget(self.project_details)
-            splitter.addWidget(projects_panel)
-            splitter.setSizes([650, 520])
+            preview_panel = QFrame()
+            preview_panel.setObjectName("panel")
+            preview_layout = QVBoxLayout(preview_panel)
+            preview_layout.setContentsMargins(16, 16, 16, 16)
+            preview_layout.setSpacing(10)
+            preview_title = QLabel("Preview")
+            preview_title.setObjectName("panelTitle")
+            preview_layout.addWidget(preview_title)
+            self.review_widget = QFrame()
+            self.review_widget.setObjectName("reviewStrip")
+            review_layout = QHBoxLayout(self.review_widget)
+            review_layout.setContentsMargins(0, 0, 0, 0)
+            review_layout.setSpacing(10)
+            self.review_cards: list[tuple[QLabel, QLabel]] = []
+            for _ in range(3):
+                card = QFrame()
+                card.setObjectName("reviewCard")
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(10, 10, 10, 10)
+                card_layout.setSpacing(8)
+                image_label = QLabel("Warte auf Mittelframe ...")
+                image_label.setObjectName("reviewImage")
+                image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                image_label.setMinimumHeight(160)
+                image_label.setWordWrap(True)
+                caption_label = QLabel("")
+                caption_label.setObjectName("reviewCaption")
+                caption_label.setWordWrap(True)
+                card_layout.addWidget(image_label, 1)
+                card_layout.addWidget(caption_label)
+                review_layout.addWidget(card, 1)
+                self.review_cards.append((image_label, caption_label))
+            self.review_widget.hide()
+            preview_layout.addWidget(self.review_widget, 1)
+            self.preview_frame = QLabel("Kein File ausgewaehlt.")
+            self.preview_frame.setObjectName("preview")
+            self.preview_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.preview_frame.setMinimumHeight(320)
+            preview_layout.addWidget(self.preview_frame, 1)
+            self.preview_meta = QLabel("Waehle links eine Datei aus. Bei Video wird ein Frame aus der Mitte gezeigt.")
+            self.preview_meta.setObjectName("meta")
+            self.preview_meta.setWordWrap(True)
+            preview_layout.addWidget(self.preview_meta)
+            splitter.addWidget(preview_panel)
+            splitter.setSizes([600, 600])
 
-            status_bar = QStatusBar()
-            self.setStatusBar(status_bar)
-            self.statusBar().showMessage("Bereit.")
-
-            file_action = QAction("Dateien waehlen", self)
-            file_action.triggered.connect(self.pick_files)
-            self.addAction(file_action)
+            footer = QFrame()
+            footer.setObjectName("footer")
+            footer_layout = QHBoxLayout(footer)
+            footer_layout.setContentsMargins(16, 14, 16, 14)
+            footer_layout.setSpacing(14)
+            status_column = QVBoxLayout()
+            status_column.setSpacing(8)
+            self.status_label = QLabel("Bereit. Droppe Master und Kameras oder einen ganzen Ordner.")
+            self.status_label.setObjectName("status")
+            self.status_label.setWordWrap(True)
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(0)
+            status_column.addWidget(self.status_label)
+            status_column.addWidget(self.progress_bar)
+            footer_layout.addLayout(status_column, 1)
+            self.abort_button = QPushButton("Abbrechen")
+            self.abort_button.setObjectName("secondaryButton")
+            self.abort_button.clicked.connect(self.cancel_active_job)
+            self.abort_button.hide()
+            footer_layout.addWidget(self.abort_button)
+            self.continue_button = QPushButton("Weiter")
+            self.continue_button.setObjectName("secondaryButton")
+            self.continue_button.clicked.connect(self.confirm_role_review)
+            self.continue_button.hide()
+            footer_layout.addWidget(self.continue_button)
+            self.start_button = QPushButton("VAZ")
+            self.start_button.setObjectName("vazButton")
+            self.start_button.clicked.connect(self.start_vaz)
+            footer_layout.addWidget(self.start_button)
+            layout.addWidget(footer)
 
             self.timer = QTimer(self)
             self.timer.setInterval(1200)
@@ -242,7 +201,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.setStyleSheet(
                 """
                 QWidget {
-                  color: #f4eee2;
+                  color: #f5efe4;
                   font-family: "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
                   font-size: 14px;
                 }
@@ -252,131 +211,541 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 QLabel {
                   background: transparent;
                 }
-                QFrame#hero, QFrame#panel, QFrame#metricCard, QFrame#dropPanel {
+                QFrame#header, QFrame#panel, QFrame#footer {
                   background: #171d25;
                   border: 1px solid rgba(255,255,255,0.08);
                   border-radius: 18px;
                 }
-                QFrame#metricsFrame {
-                  background: transparent;
-                  border: 0;
-                }
-                QFrame#dropPanel[dragover="true"] {
-                  border: 1px solid #ef6b3c;
-                  background: #1e242e;
-                }
                 QLabel#eyebrow {
                   color: #ef9d4d;
-                  font-size: 12px;
+                  font-size: 11px;
                   font-weight: 800;
                   letter-spacing: 2px;
-                  text-transform: uppercase;
                 }
-                QLabel#heroTitle {
+                QLabel#title {
                   font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
-                  font-size: 34px;
+                  font-size: 32px;
                   font-weight: 700;
                 }
-                QLabel#heroSubtitle, QLabel#workspaceLabel, QLabel#dropSubtitle {
+                QLabel#subtitle, QLabel#hint, QLabel#meta, QLabel#status {
                   color: #b9b2a3;
-                  line-height: 1.5;
+                  line-height: 1.45;
                 }
-                QLabel#workspaceLabel {
-                  padding-left: 2px;
-                }
-                QLabel#dropTitle, QLabel#panelTitle, QLabel#detailTitle {
+                QLabel#panelTitle {
                   font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
-                }
-                QLabel#dropTitle { font-size: 24px; }
-                QLabel#panelTitle { font-size: 22px; }
-                QLabel#detailTitle { font-size: 18px; }
-                QLabel#metricLabel {
-                  color: #b9b2a3;
-                  font-size: 11px;
-                  font-weight: 700;
-                  letter-spacing: 1.8px;
-                  text-transform: uppercase;
-                }
-                QLabel#metricValue {
-                  font-size: 24px;
+                  font-size: 22px;
                   font-weight: 700;
                 }
-                QPushButton {
-                  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ef9d4d, stop:1 #ef6b3c);
-                  color: #15110d;
-                  border: 0;
-                  border-radius: 18px;
-                  padding: 10px 16px;
-                  font-weight: 700;
-                }
-                QPushButton[secondary="true"] {
-                  background: rgba(255,255,255,0.06);
-                  color: #f4eee2;
-                  border: 1px solid rgba(255,255,255,0.08);
-                }
-                QPushButton:disabled {
-                  color: rgba(244,238,226,0.45);
-                  background: rgba(255,255,255,0.05);
-                }
-                QListWidget, QPlainTextEdit {
+                QListWidget, QLabel#preview, QLabel#reviewImage {
                   background: #11161d;
                   border: 1px solid rgba(255,255,255,0.08);
-                  border-radius: 14px;
-                  padding: 8px;
+                  border-radius: 16px;
                 }
                 QListWidget {
-                  min-height: 120px;
+                  padding: 8px;
                 }
                 QListWidget::item {
-                  padding: 10px;
+                  padding: 12px 10px;
                   border-bottom: 1px solid rgba(255,255,255,0.04);
                 }
                 QListWidget::item:selected {
                   background: #202734;
                   border-radius: 10px;
                 }
+                QLabel#preview {
+                  padding: 12px;
+                }
+                QFrame#reviewCard {
+                  background: rgba(255,255,255,0.03);
+                  border: 1px solid rgba(255,255,255,0.08);
+                  border-radius: 16px;
+                }
+                QLabel#reviewImage {
+                  padding: 10px;
+                }
+                QLabel#reviewCaption {
+                  color: #b9b2a3;
+                  line-height: 1.4;
+                }
                 QProgressBar {
                   border: 1px solid rgba(255,255,255,0.08);
                   background: #11161d;
                   border-radius: 999px;
-                  text-align: center;
                   min-height: 18px;
+                  text-align: center;
                 }
                 QProgressBar::chunk {
                   border-radius: 999px;
                   background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ef9d4d, stop:1 #ef6b3c);
                 }
-                QStatusBar {
-                  color: #b9b2a3;
-                  border-top: 1px solid rgba(255,255,255,0.06);
+                QPushButton#vazButton {
+                  min-width: 152px;
+                  min-height: 52px;
+                  border: 0;
+                  border-radius: 26px;
+                  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ef9d4d, stop:1 #ef6b3c);
+                  color: #17110d;
+                  font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
+                  font-size: 22px;
+                  font-weight: 800;
+                  letter-spacing: 1px;
+                }
+                QPushButton#vazButton:disabled {
+                  background: rgba(255,255,255,0.08);
+                  color: rgba(245,239,228,0.45);
+                }
+                QPushButton#secondaryButton {
+                  min-width: 132px;
+                  min-height: 46px;
+                  border-radius: 23px;
+                  border: 1px solid rgba(255,255,255,0.10);
+                  background: rgba(255,255,255,0.06);
+                  color: #f5efe4;
+                  font-weight: 700;
+                }
+                QPushButton#secondaryButton:disabled {
+                  color: rgba(245,239,228,0.45);
                 }
                 """
             )
 
-        def pick_files(self) -> None:
-            paths, _ = QFileDialog.getOpenFileNames(
-                self,
-                "Clips und Master waehlen",
-                str(Path.home()),
-                "Media Files (*.wav *.mp3 *.m4a *.aac *.mov *.mp4 *.mxf *.mkv *.avi);;Alle Dateien (*.*)",
-            )
+        def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+            if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()):
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+
+        def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+            paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
             if paths:
                 self.import_paths(paths)
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+
+        def resizeEvent(self, event) -> None:  # type: ignore[override]
+            super().resizeEvent(event)
+            self._refresh_preview_pixmap()
 
         def import_paths(self, paths: list[str]) -> None:
+            if self._active_job_is_busy():
+                QMessageBox.information(
+                    self,
+                    "VAZer",
+                    "Ein Lauf ist bereits aktiv. Warte kurz, bis er fertig ist, bevor du neue Dateien hinzufügst.",
+                )
+                return
+
+            if self.active_job_id:
+                self.active_job_id = None
+                self.active_project_id = None
+
             expanded = self._expand_paths(paths)
             if not expanded:
-                self.statusBar().showMessage("Keine gueltigen Dateien gefunden.")
+                self.status_label.setText("Keine gueltigen Dateien gefunden.")
                 return
-            project_name = Path(expanded[0]).stem or "VAZ Projekt"
+
+            known = {file_info["stored_path"] for file_info in self.staged_files}
+            added = 0
+            for candidate in expanded:
+                if candidate in known:
+                    continue
+                known.add(candidate)
+                self.staged_files.append(
+                    {
+                        "display_name": Path(candidate).name,
+                        "original_path": candidate,
+                        "stored_path": candidate,
+                        "ui_status": "queued",
+                        "ui_note": "Ready to start.",
+                    }
+                )
+                added += 1
+
+            if not added:
+                self.status_label.setText("Diese Dateien sind bereits in der Liste.")
+            else:
+                self.status_label.setText(f"{added} Datei(en) hinzugefuegt. Wenn alles passt, drueck VAZ.")
+            self.refresh_file_list(preserve_selection=True)
+
+        def start_vaz(self) -> None:
+            if self._active_job_is_busy():
+                return
+
+            if not self.staged_files:
+                QMessageBox.information(self, "VAZer", "Es sind noch keine Dateien in der Liste.")
+                return
+
+            paths = [file_info["stored_path"] for file_info in self.staged_files]
+            project_name = self._suggest_project_name(paths)
             try:
-                result = self.app_state.create_project_from_paths(expanded, name=project_name)
+                result = self.app_state.create_project_from_paths(paths, name=project_name)
             except Exception as error:
                 QMessageBox.critical(self, "VAZer", str(error))
                 return
 
-            self.statusBar().showMessage(f"Projekt angelegt: {project_name}")
-            self.refresh_state(select_job_id=result["job_id"], select_project_id=result["project_id"])
+            self.active_project_id = result["project_id"]
+            self.active_job_id = result["job_id"]
+            self.staged_files = []
+            self.status_label.setText(f"VAZ gestartet: {project_name}")
+            self.refresh_state()
+
+        def confirm_role_review(self) -> None:
+            if not self.active_job_id:
+                return
+            try:
+                self.app_state.confirm_job(self.active_job_id)
+            except Exception as error:
+                QMessageBox.critical(self, "VAZer", str(error))
+                return
+            self.refresh_state()
+
+        def cancel_active_job(self) -> None:
+            if not self.active_job_id:
+                return
+            try:
+                self.app_state.cancel_job(self.active_job_id)
+            except Exception as error:
+                QMessageBox.critical(self, "VAZer", str(error))
+                return
+            self.refresh_state()
+
+        def refresh_state(self) -> None:
+            self.snapshot = self.app_state.snapshot()
+            active_project = self._find_active_project()
+            active_job = self._find_active_job()
+            role_review_payload = self._build_role_review_payload(active_project, active_job)
+
+            if active_project is None and active_job is None and not self.staged_files:
+                self.file_meta.setText("Droppe Dateien oder einen Ordner. Die Liste sammelt alles fuer genau einen Lauf.")
+                self.progress_bar.setValue(0)
+                self.start_button.setEnabled(False)
+                self.start_button.show()
+                self.continue_button.hide()
+                self.abort_button.hide()
+                self.refresh_file_list()
+                self._show_selected_file_preview()
+                return
+
+            if active_project is not None:
+                self.refresh_file_list(files=active_project.get("files") or [])
+                classification = active_project.get("classification") or {}
+                file_count = len(active_project.get("files") or [])
+                if isinstance(classification, dict) and classification.get("warnings"):
+                    warning_text = " | ".join(str(item) for item in classification["warnings"])
+                    self.file_meta.setText(f"{file_count} Datei(en) im Lauf. {warning_text}")
+                else:
+                    self.file_meta.setText(f"{file_count} Datei(en) im aktuellen Lauf.")
+            else:
+                self.refresh_file_list(preserve_selection=True)
+                self.file_meta.setText(f"{len(self.staged_files)} Datei(en) vorgemerkt fuer den naechsten Lauf.")
+
+            if active_job is None:
+                self.progress_bar.setValue(0)
+                self.start_button.setEnabled(bool(self.staged_files))
+                self.start_button.show()
+                self.continue_button.hide()
+                self.abort_button.hide()
+                self._show_selected_file_preview()
+                return
+
+            self.progress_bar.setValue(int(round(float(active_job.get("progress_percent") or 0.0))))
+            self.status_label.setText(
+                f"{active_job.get('stage_label') or '-'} | {active_job.get('message') or '-'}"
+            )
+            review_required = active_job.get("status") == "review_required"
+            self.start_button.setEnabled(False)
+            self.start_button.setVisible(not review_required)
+            self.continue_button.setVisible(review_required)
+            self.abort_button.setVisible(review_required)
+            self.continue_button.setEnabled(review_required)
+            self.abort_button.setEnabled(review_required)
+            if active_job.get("status") not in {"queued", "running", "pause_requested", "paused", "review_required"}:
+                self.start_button.setEnabled(bool(self.staged_files))
+            if role_review_payload is not None:
+                self._show_role_review(role_review_payload)
+            else:
+                self._show_selected_file_preview()
+
+        def refresh_file_list(self, *, files: list[dict[str, Any]] | None = None, preserve_selection: bool = False) -> None:
+            current_path = self._current_list_path() if preserve_selection else None
+            source_files = files if files is not None else self.staged_files
+            self.file_list.blockSignals(True)
+            self.file_list.clear()
+            selected_row = -1
+            for index, file_info in enumerate(source_files):
+                item = QListWidgetItem(self._file_item_text(file_info))
+                item.setData(Qt.ItemDataRole.UserRole, file_info["stored_path"])
+                item.setToolTip(str(file_info.get("ui_note") or ""))
+                self.file_list.addItem(item)
+                if current_path and file_info["stored_path"] == current_path:
+                    selected_row = index
+            self.file_list.blockSignals(False)
+            if self.file_list.count():
+                self.file_list.setCurrentRow(selected_row if selected_row >= 0 else 0)
+            else:
+                self.on_file_selection_changed()
+
+        def _file_item_text(self, file_info: dict[str, Any]) -> str:
+            status = str(file_info.get("ui_status") or "queued")
+            note = str(file_info.get("ui_note") or "")
+            display_name = str(file_info.get("display_name") or Path(file_info["stored_path"]).name)
+            return f"{display_name}\n{status}{' | ' + note if note else ''}"
+
+        def on_file_selection_changed(self) -> None:
+            if self._build_role_review_payload(self._find_active_project(), self._find_active_job()) is not None:
+                return
+            self._show_selected_file_preview()
+
+        def _show_selected_file_preview(self) -> None:
+            self.review_widget.hide()
+            self.preview_frame.show()
+            file_info = self._selected_file_info()
+            if file_info is None:
+                self.preview_frame.setText("Kein File ausgewaehlt.")
+                self.preview_frame.setPixmap(QPixmap())
+                self.preview_meta.setText("Waehle links eine Datei aus.")
+                self.current_preview_pixmap = None
+                self.current_preview_key = None
+                return
+
+            self.preview_meta.setText(self._build_preview_meta(file_info))
+            preview_path = self._build_preview_image(file_info["stored_path"])
+            if preview_path is None:
+                self.preview_frame.setPixmap(QPixmap())
+                self.preview_frame.setText("Keine Video-Vorschau fuer diese Datei.")
+                self.current_preview_pixmap = None
+                self.current_preview_key = None
+                return
+
+            pixmap = QPixmap(str(preview_path))
+            if pixmap.isNull():
+                self.preview_frame.setPixmap(QPixmap())
+                self.preview_frame.setText("Preview konnte nicht geladen werden.")
+                self.current_preview_pixmap = None
+                self.current_preview_key = None
+                return
+
+            self.preview_frame.setText("")
+            self.current_preview_pixmap = pixmap
+            self.current_preview_key = file_info["stored_path"]
+            self._refresh_preview_pixmap()
+
+        def _show_role_review(self, payload: dict[str, Any]) -> None:
+            self.preview_frame.hide()
+            self.review_widget.show()
+            summary_text = payload.get("summary_text") or "Mittelframes fuer die Rollenpruefung."
+            source_text = payload.get("source_text") or ""
+            self.preview_meta.setText(f"{summary_text}\n{source_text}".strip())
+            cards = payload.get("cards") or []
+            for index, (image_label, caption_label) in enumerate(self.review_cards):
+                if index >= len(cards):
+                    image_label.setPixmap(QPixmap())
+                    image_label.setText("")
+                    caption_label.setText("")
+                    continue
+                card = cards[index]
+                image_path = card.get("frame_path")
+                if image_path and Path(image_path).exists():
+                    pixmap = QPixmap(str(image_path))
+                    if pixmap.isNull():
+                        image_label.setPixmap(QPixmap())
+                        image_label.setText("Frame konnte nicht geladen werden.")
+                    else:
+                        scaled = pixmap.scaled(
+                            image_label.size(),
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        image_label.setPixmap(scaled)
+                        image_label.setText("")
+                else:
+                    image_label.setPixmap(QPixmap())
+                    image_label.setText("Warte auf Mittelframe ...")
+
+                role = card.get("role")
+                confidence = card.get("confidence")
+                reason = card.get("reason")
+                lines = [str(card.get("display_name") or card.get("asset_id") or "Kamera")]
+                if role:
+                    lines.append(f"Rolle: {role}")
+                if confidence:
+                    lines.append(f"Confidence: {confidence}")
+                if reason:
+                    lines.append(str(reason))
+                caption_label.setText("\n".join(lines))
+
+        def _refresh_preview_pixmap(self) -> None:
+            if self.current_preview_pixmap is None:
+                return
+            scaled = self.current_preview_pixmap.scaled(
+                self.preview_frame.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.preview_frame.setPixmap(scaled)
+
+        def _build_preview_meta(self, file_info: dict[str, Any]) -> str:
+            media_info = self._probe_cached(file_info["stored_path"])
+            lines = [
+                f"Datei: {file_info.get('display_name') or Path(file_info['stored_path']).name}",
+                f"Status: {file_info.get('ui_status') or 'queued'}",
+            ]
+            if file_info.get("ui_note"):
+                lines.append(f"Info: {file_info['ui_note']}")
+            if media_info.duration_seconds:
+                lines.append(f"Dauer: {media_info.duration_seconds:.2f}s")
+            lines.append(f"Audio streams: {len(media_info.audio_streams)}")
+            lines.append(f"Video streams: {len(media_info.video_streams)}")
+            if media_info.video_streams:
+                stream = media_info.video_streams[0]
+                lines.append(f"Bild: {stream.width}x{stream.height}")
+            return "\n".join(lines)
+
+        def _probe_cached(self, path: str):
+            cached = self.media_cache.get(path)
+            if cached is not None:
+                return cached
+            media_info = probe_media(path)
+            self.media_cache[path] = media_info
+            return media_info
+
+        def _build_preview_image(self, path: str) -> Path | None:
+            media_info = self._probe_cached(path)
+            if not media_info.video_streams:
+                return None
+            duration_seconds = float(media_info.duration_seconds or media_info.video_streams[0].duration_seconds or 0.0)
+            if duration_seconds <= 0:
+                return None
+
+            file_path = Path(path)
+            cache_key = sha1(f"{file_path.resolve()}::{file_path.stat().st_mtime_ns}".encode("utf-8")).hexdigest()
+            preview_path = self.preview_cache_dir / f"{cache_key}.jpg"
+            if preview_path.exists():
+                return preview_path
+
+            capture = cv2.VideoCapture(str(file_path))
+            if not capture.isOpened():
+                return None
+            try:
+                capture.set(cv2.CAP_PROP_POS_MSEC, (duration_seconds / 2.0) * 1000.0)
+                ok, frame = capture.read()
+                if not ok or frame is None:
+                    return None
+                preview_path.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(preview_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
+                    return None
+                return preview_path
+            finally:
+                capture.release()
+
+        def _selected_file_info(self) -> dict[str, Any] | None:
+            current_path = self._current_list_path()
+            if not current_path:
+                return None
+            for file_info in self._current_files():
+                if file_info["stored_path"] == current_path:
+                    return file_info
+            return None
+
+        def _current_files(self) -> list[dict[str, Any]]:
+            active_project = self._find_active_project()
+            if active_project is not None:
+                return list(active_project.get("files") or [])
+            return self.staged_files
+
+        def _current_list_path(self) -> str | None:
+            item = self.file_list.currentItem()
+            if item is None:
+                return None
+            value = item.data(Qt.ItemDataRole.UserRole)
+            return None if value is None else str(value)
+
+        def _active_job_is_busy(self) -> bool:
+            active_job = self._find_active_job()
+            if active_job is None:
+                return False
+            return active_job.get("status") in {"queued", "running", "pause_requested", "paused", "review_required"}
+
+        def _build_role_review_payload(
+            self,
+            active_project: dict[str, Any] | None,
+            active_job: dict[str, Any] | None,
+        ) -> dict[str, Any] | None:
+            if active_project is None or active_job is None:
+                return None
+            if active_job.get("stage") not in {"roles", "role_review"} and active_job.get("status") != "review_required":
+                return None
+
+            classification = active_project.get("classification") or {}
+            camera_paths = list(classification.get("camera_paths") or [])
+            asset_ids = list(classification.get("camera_asset_ids") or [])
+            if not camera_paths or not asset_ids:
+                return None
+
+            artifacts = active_project.get("artifacts") or {}
+            artifacts_root = Path(active_project["artifacts_path"])
+            frame_root = artifacts_root / "camera_roles" / "frames"
+            assignments_by_asset: dict[str, dict[str, Any]] = {}
+            summary_text = None
+            source_text = None
+            camera_roles_path = artifacts.get("camera_roles_path")
+            if camera_roles_path and Path(camera_roles_path).exists():
+                try:
+                    artifact = json.loads(Path(camera_roles_path).read_text(encoding="utf-8-sig"))
+                except Exception:
+                    artifact = None
+                if isinstance(artifact, dict):
+                    summary = artifact.get("summary") or {}
+                    provider = artifact.get("provider") or {}
+                    summary_text = summary.get("summary_text")
+                    source_name = provider.get("name")
+                    source_model = provider.get("model")
+                    if source_name == "openai":
+                        source_text = f"AI-Rollen von {source_model or 'OpenAI'}"
+                    elif source_name:
+                        source_text = f"Rollenquelle: {source_name}"
+                    for assignment in artifact.get("assignments", []):
+                        if isinstance(assignment, dict) and isinstance(assignment.get("asset_id"), str):
+                            assignments_by_asset[assignment["asset_id"]] = assignment
+
+            cards: list[dict[str, Any]] = []
+            for index, (asset_id, camera_path) in enumerate(zip(asset_ids, camera_paths, strict=True), start=1):
+                assignment = assignments_by_asset.get(asset_id, {})
+                frame_path = frame_root / f"{index:02d}-{_slugify(asset_id)}.jpg"
+                cards.append(
+                    {
+                        "asset_id": asset_id,
+                        "display_name": Path(camera_path).name,
+                        "frame_path": str(frame_path) if frame_path.exists() else None,
+                        "role": assignment.get("role"),
+                        "confidence": assignment.get("confidence"),
+                        "reason": assignment.get("reason"),
+                    }
+                )
+            if not any(card.get("frame_path") for card in cards):
+                return None
+            return {
+                "summary_text": summary_text,
+                "source_text": source_text,
+                "cards": cards[: len(self.review_cards)],
+            }
+
+        def _find_active_project(self) -> dict[str, Any] | None:
+            if not self.active_project_id:
+                return None
+            for project in self.snapshot.get("projects", []):
+                if project.get("id") == self.active_project_id:
+                    return project
+            return None
+
+        def _find_active_job(self) -> dict[str, Any] | None:
+            if not self.active_job_id:
+                return None
+            for job in self.snapshot.get("jobs", []):
+                if job.get("id") == self.active_job_id:
+                    return job
+            return None
 
         def _expand_paths(self, paths: list[str]) -> list[str]:
             collected: list[str] = []
@@ -396,156 +765,15 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                         collected.append(resolved)
             return collected
 
-        def refresh_state(
-            self,
-            *,
-            select_job_id: str | None = None,
-            select_project_id: str | None = None,
-        ) -> None:
-            previous_job_id = select_job_id or self._current_item_id(self.jobs_list)
-            previous_project_id = select_project_id or self._current_item_id(self.projects_list)
-            snapshot = self.app_state.snapshot()
-            self.snapshot = snapshot
-            jobs = snapshot["jobs"]
-            projects = snapshot["projects"]
-            self.workspace_label.setText(snapshot["workspace"])
-            self.metric_labels["Projekte"].setText(str(len(projects)))
-            self.metric_labels["Aktiv"].setText(str(sum(1 for job in jobs if job["status"] in {"queued", "running", "paused", "pause_requested"})))
-            self.metric_labels["Fertig"].setText(str(sum(1 for job in jobs if job["status"] == "completed")))
-
-            self.jobs_list.blockSignals(True)
-            self.jobs_list.clear()
-            selected_job_row = -1
-            for row, job in enumerate(jobs):
-                item = QListWidgetItem(self._job_summary(job))
-                item.setData(Qt.ItemDataRole.UserRole, job["id"])
-                self.jobs_list.addItem(item)
-                if job["id"] == previous_job_id:
-                    selected_job_row = row
-            self.jobs_list.blockSignals(False)
-            if self.jobs_list.count():
-                self.jobs_list.setCurrentRow(selected_job_row if selected_job_row >= 0 else 0)
-            else:
-                self.on_job_selection_changed()
-
-            self.projects_list.blockSignals(True)
-            self.projects_list.clear()
-            selected_project_row = -1
-            for row, project in enumerate(projects):
-                item = QListWidgetItem(self._project_summary(project))
-                item.setData(Qt.ItemDataRole.UserRole, project["id"])
-                self.projects_list.addItem(item)
-                if project["id"] == previous_project_id:
-                    selected_project_row = row
-            self.projects_list.blockSignals(False)
-            if self.projects_list.count():
-                self.projects_list.setCurrentRow(selected_project_row if selected_project_row >= 0 else 0)
-            else:
-                self.on_project_selection_changed()
-
-        def _job_summary(self, job: dict[str, object]) -> str:
-            progress = int(round(float(job.get("progress_percent") or 0.0)))
-            return f"[{progress:>3}%] {job['project_name']}  |  {job['status']}  |  {job.get('stage_label') or '-'}"
-
-        def _project_summary(self, project: dict[str, object]) -> str:
-            classification = project.get("classification") or {}
-            camera_count = classification.get("camera_count") if isinstance(classification, dict) else 0
-            return f"{project['name']}  |  {camera_count} Kamera(s)"
-
-        def _current_item_id(self, widget: QListWidget) -> str | None:
-            item = widget.currentItem()
-            if item is None:
-                return None
-            value = item.data(Qt.ItemDataRole.UserRole)
-            return None if value is None else str(value)
-
-        def _selected_payload(self, key: str, widget: QListWidget) -> dict[str, object] | None:
-            item_id = self._current_item_id(widget)
-            if not item_id:
-                return None
-            for payload in self.snapshot.get(key, []):
-                if payload["id"] == item_id:
-                    return payload
-            return None
-
-        def on_job_selection_changed(self) -> None:
-            job = self._selected_payload("jobs", self.jobs_list)
-            if not job:
-                self.job_stage.setText("Kein Job gewaehlt.")
-                self.job_progress.setValue(0)
-                self.job_details.setPlainText("")
-                self.pause_button.setEnabled(False)
-                self.resume_button.setEnabled(False)
-                return
-
-            self.job_stage.setText(f"{job['project_name']} - {job.get('stage_label') or '-'}")
-            self.job_progress.setValue(int(round(float(job.get("progress_percent") or 0.0))))
-            details = job.get("details") or {}
-            artifacts = job.get("artifacts") or {}
-            lines = [
-                f"Status: {job['status']}",
-                f"Message: {job.get('message') or '-'}",
-                f"Updated: {job.get('updated_at_utc') or '-'}",
-                "",
-                f"Master: {details.get('master_asset') or '-'}",
-                f"Kameras: {details.get('camera_count') or '-'}",
-                f"Dateien: {details.get('file_count') or '-'}",
-            ]
-            if artifacts.get("sync_map_path"):
-                lines.extend(["", f"sync_map: {artifacts['sync_map_path']}"])
-            self.job_details.setPlainText("\n".join(lines))
-            self.pause_button.setEnabled(job["status"] in {"running", "pause_requested"})
-            self.resume_button.setEnabled(job["status"] == "paused")
-
-        def on_project_selection_changed(self) -> None:
-            project = self._selected_payload("projects", self.projects_list)
-            if not project:
-                self.project_title.setText("Kein Projekt gewaehlt.")
-                self.project_details.setPlainText("")
-                return
-
-            self.project_title.setText(str(project["name"]))
-            classification = project.get("classification") or {}
-            artifacts = project.get("artifacts") or {}
-            files = project.get("files") or []
-            lines = [
-                f"Root: {project.get('root_path') or '-'}",
-                f"Master: {classification.get('master_asset') if isinstance(classification, dict) else '-'}",
-                f"Kameras: {classification.get('camera_count') if isinstance(classification, dict) else '-'}",
-            ]
-            if isinstance(artifacts, dict) and artifacts.get("sync_map_path"):
-                lines.append(f"sync_map: {artifacts['sync_map_path']}")
-            lines.extend(["", "Dateien:"])
-            lines.extend(f"- {file_info.get('original_path')}" for file_info in files if isinstance(file_info, dict))
-            self.project_details.setPlainText("\n".join(lines))
-
-        def pause_selected_job(self) -> None:
-            job_id = self._current_item_id(self.jobs_list)
-            if not job_id:
-                return
-            try:
-                self.app_state.pause_job(job_id)
-            except Exception as error:
-                QMessageBox.critical(self, "VAZer", str(error))
-                return
-            self.refresh_state(select_job_id=job_id)
-
-        def resume_selected_job(self) -> None:
-            job_id = self._current_item_id(self.jobs_list)
-            if not job_id:
-                return
-            try:
-                self.app_state.resume_job(job_id)
-            except Exception as error:
-                QMessageBox.critical(self, "VAZer", str(error))
-                return
-            self.refresh_state(select_job_id=job_id)
-
-    def _mime_has_local_urls(mime_data: QMimeData) -> bool:
-        return mime_data.hasUrls() and any(url.isLocalFile() for url in mime_data.urls())
-
-    def _paths_from_mime(mime_data: QMimeData) -> list[str]:
-        return [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
+        def _suggest_project_name(self, expanded_paths: list[str]) -> str:
+            resolved = [Path(path) for path in expanded_paths]
+            if len(resolved) == 1:
+                return resolved[0].stem or "VAZ Projekt"
+            parents = {path.parent for path in resolved}
+            if len(parents) == 1:
+                parent = next(iter(parents))
+                return parent.name or "VAZ Projekt"
+            return f"VAZ Import ({len(resolved)} Dateien)"
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow(UIState(Path(workspace)))

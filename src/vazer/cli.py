@@ -7,6 +7,11 @@ from typing import Any
 
 from .analysis import AnalysisOptions, build_analysis_map, load_analysis_map, write_analysis_map
 from .ai_draft import AIDraftOptions, build_ai_draft_cut_plan
+from .camera_roles import (
+    CameraRoleOptions,
+    build_camera_role_artifact_from_sync_map,
+    write_camera_role_artifact,
+)
 from .cut_plan import DraftPlanOptions, build_baseline_cut_plan, build_draft_cut_plan, load_json_artifact, write_cut_plan
 from .cut_review import (
     CutValidationOptions,
@@ -186,6 +191,21 @@ def _build_parser() -> argparse.ArgumentParser:
     technical_parser.add_argument("--video-window", type=float, default=AnalysisOptions().video_window_seconds)
     technical_parser.add_argument("--analysis-width", type=int, default=AnalysisOptions().analysis_width)
     technical_parser.add_argument("--json", action="store_true", help="Print the generated analysis_map JSON to stdout.")
+
+    roles_parser = analyze_subparsers.add_parser(
+        "roles",
+        help="Ask OpenAI once to classify synced theater cameras into totale / halbtotale / close from middle frames.",
+    )
+    roles_parser.add_argument("--sync-map", required=True, help="Path to a sync_map JSON file.")
+    roles_parser.add_argument("--out", required=True, help="Path to the camera_roles JSON output.")
+    roles_parser.add_argument("--out-dir", required=True, help="Directory for exported middle-frame images.")
+    roles_parser.add_argument("--model", default=CameraRoleOptions().model)
+    roles_parser.add_argument("--image-width", type=int, default=CameraRoleOptions().image_width)
+    roles_parser.add_argument("--image-quality", type=int, default=CameraRoleOptions().image_quality)
+    roles_parser.add_argument("--temperature", type=float, default=CameraRoleOptions().temperature)
+    roles_parser.add_argument("--max-output-tokens", type=int, default=CameraRoleOptions().max_output_tokens)
+    roles_parser.add_argument("--notes", help="Optional extra notes for the AI role classifier.")
+    roles_parser.add_argument("--json", action="store_true", help="Print the generated camera_roles JSON to stdout.")
 
     visuals_parser = analyze_subparsers.add_parser(
         "visuals",
@@ -397,6 +417,17 @@ def _build_ai_draft_options(args: argparse.Namespace) -> AIDraftOptions:
     )
 
 
+def _build_camera_role_options(args: argparse.Namespace) -> CameraRoleOptions:
+    return CameraRoleOptions(
+        model=args.model,
+        image_width=args.image_width,
+        image_quality=args.image_quality,
+        temperature=args.temperature,
+        max_output_tokens=args.max_output_tokens,
+        user_notes=args.notes,
+    )
+
+
 def _parse_role_overrides(values: list[str]) -> dict[str, str]:
     overrides: dict[str, str] = {}
     for value in values:
@@ -539,6 +570,24 @@ def _print_analysis_map_summary(analysis_map: dict[str, Any], output_path: Path)
             )
         else:
             print(f"[failed] {Path(entry['path']).name}: {entry['error']}")
+
+
+def _print_camera_role_summary(artifact: dict[str, Any], output_path: Path) -> None:
+    summary = artifact["summary"]
+    print(f"Camera roles written to: {output_path}")
+    print(f"Assets: {summary['asset_count']}")
+    print(
+        "Role counts: "
+        f"close {summary['role_counts']['close']}, "
+        f"halbtotale {summary['role_counts']['halbtotale']}, "
+        f"totale {summary['role_counts']['totale']}"
+    )
+    print(f"Summary: {summary['summary_text']}")
+    for assignment in artifact["assignments"]:
+        print(
+            f"[{assignment['role']}] {assignment['asset_id']} "
+            f"({assignment['confidence']}): {assignment['reason']}"
+        )
 
 
 def _print_render_scaffold_summary(manifest: dict[str, Any]) -> None:
@@ -793,6 +842,25 @@ def main() -> int:
         else:
             _print_analysis_map_summary(analysis_map, output_path)
         return 0 if analysis_map["summary"]["analyzed"] > 0 else 1
+
+    if args.command == "analyze" and args.analyze_command == "roles":
+        try:
+            sync_map = load_json_artifact(args.sync_map)
+            camera_role_artifact = build_camera_role_artifact_from_sync_map(
+                sync_map,
+                output_dir=args.out_dir,
+                options=_build_camera_role_options(args),
+                source_sync_map_path=args.sync_map,
+            )
+            output_path = write_camera_role_artifact(camera_role_artifact, args.out)
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(camera_role_artifact, indent=2))
+        else:
+            _print_camera_role_summary(camera_role_artifact, output_path)
+        return 0
 
     if args.command == "analyze" and args.analyze_command == "visuals":
         try:
