@@ -13,10 +13,17 @@ import uuid
 import webbrowser
 
 from . import __version__
+from .analysis import AnalysisOptions, build_analysis_map, write_analysis_map
 from .camera_roles import build_camera_role_artifact, infer_camera_role_from_name, write_camera_role_artifact
+from .cut_plan import write_cut_plan
+from .cut_review import CutValidationOptions, build_cut_validation_report, repair_cut_plan, write_cut_validation_report
 from .fftools import MediaInfo, probe_media
+from .render import apply_max_render_size, build_render_scaffold, run_render
 from .sync import SyncOptions, analyze_sync
 from .sync_map import write_sync_map
+from .theater_pipeline import TheaterPipelineOptions, build_chunked_ai_draft_bundle
+from .transcribe import TranscriptionOptions, build_master_transcript, write_transcript_artifact
+from .visual_packet import write_visual_packet
 
 INDEX_HTML = """<!doctype html>
 <html lang="de">
@@ -1196,18 +1203,215 @@ class UIState:
             )
             self._write_project_manifest(project_id)
 
+            project_root = Path(self._projects[project_id]["root_path"])
+            role_overrides = dict(classification.get("camera_roles") or {})
+
+            self._wait_if_paused(job_id)
+            self._raise_if_canceled(job_id)
             self._update_job(
                 job_id,
-                status="completed" if final_sync_map["summary"]["synced"] > 0 else "failed",
+                stage="transcribing",
+                stage_label="Transcript",
+                message="Transcribing master audio with Whisper.",
+                progress_percent=58.0,
+            )
+            transcript_artifact = build_master_transcript(
+                master_path,
+                source_sync_map_path=str(sync_map_path),
+                options=TranscriptionOptions(model="whisper-1"),
+            )
+            transcript_path = artifacts_root / "transcript.json"
+            write_transcript_artifact(transcript_artifact, str(transcript_path))
+            self._update_project(
+                project_id,
+                artifacts={
+                    **self._projects[project_id]["artifacts"],
+                    "transcript_path": str(transcript_path),
+                },
+            )
+            self._write_project_manifest(project_id)
+
+            self._wait_if_paused(job_id)
+            self._raise_if_canceled(job_id)
+            self._update_job(
+                job_id,
+                stage="analysis",
+                stage_label="Analyse",
+                message="Running cheap technical analysis on synced cameras.",
+                progress_percent=66.0,
+            )
+            analysis_map = build_analysis_map(
+                final_sync_map,
+                source_sync_map_path=str(sync_map_path),
+                options=AnalysisOptions(),
+            )
+            analysis_map_path = artifacts_root / "analysis_map.json"
+            write_analysis_map(analysis_map, str(analysis_map_path))
+            self._update_project(
+                project_id,
+                artifacts={
+                    **self._projects[project_id]["artifacts"],
+                    "analysis_map_path": str(analysis_map_path),
+                },
+            )
+            self._write_project_manifest(project_id)
+
+            self._wait_if_paused(job_id)
+            self._raise_if_canceled(job_id)
+            self._update_job(
+                job_id,
+                stage="planning",
+                stage_label="AI Schnitt",
+                message="Building chunked AI draft for the full theater recording.",
+                progress_percent=74.0,
+            )
+            planning_root = artifacts_root / "planning"
+            draft_bundle = build_chunked_ai_draft_bundle(
+                final_sync_map,
+                source_sync_map_path=str(sync_map_path),
+                analysis_map=analysis_map,
+                source_analysis_path=str(analysis_map_path),
+                transcript_artifact=transcript_artifact,
+                source_transcript_path=str(transcript_path),
+                role_overrides=role_overrides,
+                output_dir=str(planning_root),
+                options=TheaterPipelineOptions(),
+            )
+            visual_packet_path = planning_root / "visual_packet.json"
+            write_visual_packet(draft_bundle["visual_packet"], str(visual_packet_path))
+            for chunk_index, chunk_plan in enumerate(draft_bundle["chunk_plans"], start=1):
+                chunk_path = planning_root / "chunks" / f"chunk_{chunk_index:04d}.cut_plan.ai.json"
+                write_cut_plan(chunk_plan, str(chunk_path))
+            ai_cut_plan = draft_bundle["combined_cut_plan"]
+            ai_cut_plan_path = artifacts_root / "cut_plan.ai.json"
+            write_cut_plan(ai_cut_plan, str(ai_cut_plan_path))
+            self._update_project(
+                project_id,
+                artifacts={
+                    **self._projects[project_id]["artifacts"],
+                    "visual_packet_path": str(visual_packet_path),
+                    "cut_plan_ai_path": str(ai_cut_plan_path),
+                },
+            )
+            self._write_project_manifest(project_id)
+
+            self._wait_if_paused(job_id)
+            self._raise_if_canceled(job_id)
+            self._update_job(
+                job_id,
+                stage="validate",
+                stage_label="Cuts pruefen",
+                message="Validating proposed cut points.",
+                progress_percent=82.0,
+            )
+            validation_report = build_cut_validation_report(
+                ai_cut_plan,
+                sync_map=final_sync_map,
+                source_cut_plan_path=str(ai_cut_plan_path),
+                source_sync_map_path=str(sync_map_path),
+                analysis_map=analysis_map,
+                source_analysis_path=str(analysis_map_path),
+                transcript_artifact=transcript_artifact,
+                source_transcript_path=str(transcript_path),
+                options=CutValidationOptions(),
+            )
+            validation_path = artifacts_root / "cut_validation.json"
+            write_cut_validation_report(validation_report, str(validation_path))
+
+            self._wait_if_paused(job_id)
+            self._raise_if_canceled(job_id)
+            self._update_job(
+                job_id,
+                stage="repair",
+                stage_label="Cuts reparieren",
+                message="Applying deterministic local cut repairs.",
+                progress_percent=86.0,
+            )
+            repaired_cut_plan = repair_cut_plan(
+                ai_cut_plan,
+                validation_report,
+                sync_map=final_sync_map,
+                source_cut_plan_path=str(ai_cut_plan_path),
+                source_validation_path=str(validation_path),
+                analysis_map=analysis_map,
+                transcript_artifact=transcript_artifact,
+                options=CutValidationOptions(),
+            )
+            repaired_cut_plan_path = artifacts_root / "cut_plan.repaired.json"
+            write_cut_plan(repaired_cut_plan, str(repaired_cut_plan_path))
+            render_ready_cut_plan = apply_max_render_size(repaired_cut_plan, max_width=1920, max_height=1080)
+            render_ready_cut_plan_path = artifacts_root / "cut_plan.repaired.fhd.json"
+            write_cut_plan(render_ready_cut_plan, str(render_ready_cut_plan_path))
+            self._update_project(
+                project_id,
+                artifacts={
+                    **self._projects[project_id]["artifacts"],
+                    "cut_validation_path": str(validation_path),
+                    "cut_plan_repaired_path": str(repaired_cut_plan_path),
+                    "cut_plan_render_path": str(render_ready_cut_plan_path),
+                },
+            )
+            self._write_project_manifest(project_id)
+
+            self._wait_if_paused(job_id)
+            self._raise_if_canceled(job_id)
+            self._update_job(
+                job_id,
+                stage="rendering",
+                stage_label="Render",
+                message="Rendering final FHD cut.",
+                progress_percent=90.0,
+            )
+            output_root = project_root / "output"
+            output_root.mkdir(parents=True, exist_ok=True)
+            output_media_path = output_root / f"{project['name']}.fhd.mp4"
+            render_manifest = build_render_scaffold(
+                render_ready_cut_plan,
+                cut_plan_path=str(render_ready_cut_plan_path),
+                output_media_path=str(output_media_path),
+                scaffold_dir=str(artifacts_root / "render"),
+            )
+
+            def _render_progress(progress_percent: float, _state: str) -> None:
+                self._update_job(
+                    job_id,
+                    stage="rendering",
+                    stage_label="Render",
+                    message=f"Rendering final FHD cut. {progress_percent:.0f}%",
+                    progress_percent=90.0 + 10.0 * (progress_percent / 100.0),
+                )
+
+            run_render(render_manifest, on_progress=_render_progress)
+            self._update_project(
+                project_id,
+                artifacts={
+                    **self._projects[project_id]["artifacts"],
+                    "render_manifest_path": str(render_manifest["artifacts"]["manifest_path"]),
+                    "render_output_path": str(output_media_path),
+                },
+            )
+            self._write_project_manifest(project_id)
+
+            self._update_job(
+                job_id,
+                status="completed",
                 stage="completed",
                 stage_label="Done",
                 message=(
-                    f"sync_map written. "
-                    f"{final_sync_map['summary']['synced']} synced, {final_sync_map['summary']['failed']} failed."
+                    f"Render complete. "
+                    f"{final_sync_map['summary']['synced']} synced, "
+                    f"{validation_report['summary']['fail']} failed cuts after validation."
                 ),
                 progress_percent=100.0,
                 artifacts={
                     "sync_map_path": str(sync_map_path),
+                    "transcript_path": str(transcript_path),
+                    "analysis_map_path": str(analysis_map_path),
+                    "visual_packet_path": str(visual_packet_path),
+                    "cut_plan_ai_path": str(ai_cut_plan_path),
+                    "cut_validation_path": str(validation_path),
+                    "cut_plan_repaired_path": str(repaired_cut_plan_path),
+                    "render_output_path": str(output_media_path),
                 },
                 details={
                     "file_count": len(files),

@@ -14,6 +14,7 @@ Update vom 2026-03-18:
 - dazu jetzt auch ein nativer PySide6-Desktop-Start ohne Browser-Upload
 - AI-Kamerarollen aus einem Mittelframe pro Kamera
 - Desktop-Review-Stopp fuer diese Rollen vor dem Sync
+- Desktop-End-to-End-Lauf jetzt bis zum FHD-Render
 
 Warum Python fuer diesen Start:
 
@@ -71,6 +72,7 @@ Aktueller Produktscope:
 - eine minimale native Desktop-Oberflaeche fuer denselben ingest -> sync_map Einstieg starten
 - die drei Theater-Kamerarollen in einem OpenAI-Call aus Mittelframes klassifizieren
 - den Desktop-Lauf vor dem Sync anhalten, Rollen anzeigen und per `Weiter` / `Abbrechen` freigeben
+- den Desktop-Lauf ueber Transcript, Analyse, chunked AI-Draft, Validate/Repair bis zum finalen Render durchziehen
 
 ## Smoke-Test mit den Beispiel-Dateien
 
@@ -198,7 +200,6 @@ python -m vazer analyze roles --sync-map .\artifacts\sync_map.json --out .\artif
 
 - manuelle Overrides und Review-Flags im `sync_map`
 - Proxy-/Preview-Pipeline fuer schnellere technische Analyse und Render-Checks
-- echtes `render run` statt nur Scaffold
 - weitere Pipeline-Stufen im UI ueber `sync_map` hinaus
 - sichtbarer Review-/Freigabe-Loop fuer spaetere Transcript-, Analyse- und Draft-Schritte
 - Packaging der Desktop-App zu einer echten `.exe`

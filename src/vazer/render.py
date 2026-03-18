@@ -174,3 +174,91 @@ def build_render_scaffold(
 
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
+
+
+def apply_max_render_size(
+    cut_plan: dict[str, Any],
+    *,
+    max_width: int,
+    max_height: int,
+) -> dict[str, Any]:
+    adjusted = json.loads(json.dumps(cut_plan))
+    render_defaults = adjusted.setdefault("render_defaults", {})
+    current_width = int(render_defaults.get("width") or max_width)
+    current_height = int(render_defaults.get("height") or max_height)
+
+    scale_ratio = min(1.0, max_width / max(1, current_width), max_height / max(1, current_height))
+    target_width = max(2, int(round(current_width * scale_ratio / 2.0) * 2))
+    target_height = max(2, int(round(current_height * scale_ratio / 2.0) * 2))
+
+    render_defaults["width"] = target_width
+    render_defaults["height"] = target_height
+    return adjusted
+
+
+def run_render(
+    manifest: dict[str, Any],
+    *,
+    overwrite: bool = True,
+    loglevel: str = "error",
+    on_progress: Any | None = None,
+) -> dict[str, Any]:
+    command = list(manifest["ffmpeg"]["argv"])
+    extra = ["-hide_banner", "-loglevel", loglevel, "-nostats", "-progress", "pipe:1"]
+    if overwrite:
+        extra.append("-y")
+    command[1:1] = extra
+
+    output_duration_seconds = float(manifest["output"]["duration_seconds"])
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    latest_progress = 0.0
+    progress_payload: dict[str, str] = {}
+    assert process.stdout is not None
+    for raw_line in process.stdout:
+        line = raw_line.strip()
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        progress_payload[key] = value
+        if key not in {"out_time_ms", "out_time_us", "progress"}:
+            continue
+
+        out_time_seconds = None
+        if "out_time_us" in progress_payload:
+            try:
+                out_time_seconds = float(progress_payload["out_time_us"]) / 1_000_000.0
+            except ValueError:
+                out_time_seconds = None
+        elif "out_time_ms" in progress_payload:
+            try:
+                out_time_seconds = float(progress_payload["out_time_ms"]) / 1_000_000.0
+            except ValueError:
+                out_time_seconds = None
+
+        if out_time_seconds is not None and output_duration_seconds > 0:
+            latest_progress = min(100.0, max(0.0, (out_time_seconds / output_duration_seconds) * 100.0))
+            if callable(on_progress):
+                on_progress(latest_progress, progress_payload.get("progress") or "continue")
+
+    stderr_output = ""
+    if process.stderr is not None:
+        stderr_output = process.stderr.read()
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError(stderr_output.strip() or f"ffmpeg exited with code {return_code}.")
+
+    if callable(on_progress):
+        on_progress(100.0, "end")
+    return {
+        "return_code": return_code,
+        "progress_percent": latest_progress,
+        "output_path": manifest["output"]["path"],
+    }

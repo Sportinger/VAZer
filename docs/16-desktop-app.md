@@ -15,7 +15,7 @@ Der aktuelle Minimalstand:
 - ein minimaler `VAZ`-Startbutton
 - Fortschritt fuer den aktiven Lauf
 - Rollen-Review-Stopp vor dem Sync
-- Hintergrundjob schreibt aktuell `camera_roles.json` und `sync_map.json`
+- Hintergrundjob laeuft jetzt bis zum geschnittenen FHD-Render durch
 
 ## Start
 
@@ -53,11 +53,26 @@ Der Desktop-Job macht bisher:
 4. AI-Rollen in einem Call bestimmen (`totale` / `halbtotale` / `close`)
 5. Rollen im Desktop pruefbar anzeigen
 6. erst nach `Weiter` Audio-Sync gegen den Master starten
-7. `camera_roles.json`, `sync_map.partial.json` und `sync_map.json` schreiben
+7. Masterspur mit `whisper-1` transkribieren
+8. billige technische Analyse rechnen
+9. chunked AI-Draft ueber die ganze Show bauen
+10. Cuts validieren und lokal reparieren
+11. FHD-Render ausgeben
+
+Artefakte:
+
+- `camera_roles.json`
+- `sync_map.json`
+- `transcript.json`
+- `analysis_map.json`
+- `visual_packet.json`
+- `cut_plan.ai.json`
+- `cut_validation.json`
+- `cut_plan.repaired.json`
+- finaler FHD-Render im Projektordner
 
 ## Was noch fehlt
 
-- Transcript-, Analyse- und Plan-Schritte im Desktop-Runner
 - Preview/Player
 - manuelle Overrides ueber die Rollenpruefung hinaus
 - Packaging zu einer echten `.exe`
