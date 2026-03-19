@@ -21,6 +21,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QPainter, QPainterPath, QPen, QPixmap
         from PySide6.QtWidgets import (
             QApplication,
+            QComboBox,
             QFileDialog,
             QFrame,
             QHBoxLayout,
@@ -40,7 +41,12 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         raise ValueError("PySide6 is not installed. Install project dependencies first.") from error
 
     from .fftools import probe_media
-    from .ui_server import UIState, should_ignore_import_file
+    from .ui_server import (
+        OUTPUT_MODE_PREMIERE_ONLY,
+        OUTPUT_MODE_RENDER_AND_PREMIERE,
+        UIState,
+        should_ignore_import_file,
+    )
 
     PIPELINE_PHASES = [
         {"id": "probe", "symbol": "ING", "label": "Import", "detail": "Probe"},
@@ -50,7 +56,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         {"id": "transcript", "symbol": "TXT", "label": "Text", "detail": "Whisper"},
         {"id": "analysis", "symbol": "CV", "label": "Bild", "detail": "Schaerfe + Motion"},
         {"id": "cut", "symbol": "CUT", "label": "Schnitt", "detail": "Draft + Repair"},
-        {"id": "render", "symbol": "MP4", "label": "Film", "detail": "FHD Render"},
+        {"id": "render", "symbol": "OUT", "label": "Export", "detail": "MP4 / PRPROJ"},
     ]
     STAGE_TO_PHASE_ID = {
         "queued": "probe",
@@ -64,6 +70,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         "planning": "cut",
         "validate": "cut",
         "repair": "cut",
+        "exporting_premiere": "render",
         "rendering": "render",
         "completed": "render",
     }
@@ -432,6 +439,17 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             status_column.addWidget(self.status_label)
             status_column.addWidget(self.progress_bar)
             footer_layout.addLayout(status_column, 1)
+            output_mode_column = QVBoxLayout()
+            output_mode_column.setSpacing(4)
+            output_mode_label = QLabel("Output")
+            output_mode_label.setObjectName("modeLabel")
+            self.output_mode_combo = QComboBox()
+            self.output_mode_combo.setObjectName("modeCombo")
+            self.output_mode_combo.addItem("MP4 + Premiere-Projekt", OUTPUT_MODE_RENDER_AND_PREMIERE)
+            self.output_mode_combo.addItem("Nur Premiere-Projekt", OUTPUT_MODE_PREMIERE_ONLY)
+            output_mode_column.addWidget(output_mode_label)
+            output_mode_column.addWidget(self.output_mode_combo)
+            footer_layout.addLayout(output_mode_column)
             self.abort_button = QPushButton("Abbrechen")
             self.abort_button.setObjectName("secondaryButton")
             self.abort_button.clicked.connect(self.cancel_active_job)
@@ -518,6 +536,12 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                   color: #b9b2a3;
                   line-height: 1.45;
                 }
+                QLabel#modeLabel {
+                  color: #b9b2a3;
+                  font-size: 11px;
+                  font-weight: 700;
+                  letter-spacing: 1px;
+                }
                 QLabel#panelTitle {
                   font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
                   font-size: 22px;
@@ -600,6 +624,30 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 QProgressBar::chunk {
                   border-radius: 999px;
                   background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ef9d4d, stop:1 #ef6b3c);
+                }
+                QComboBox#modeCombo {
+                  min-width: 228px;
+                  min-height: 42px;
+                  padding: 8px 14px;
+                  border-radius: 21px;
+                  border: 1px solid rgba(255,255,255,0.10);
+                  background: rgba(255,255,255,0.05);
+                  color: #f5efe4;
+                  font-weight: 700;
+                }
+                QComboBox#modeCombo:disabled {
+                  color: rgba(245,239,228,0.45);
+                  background: rgba(255,255,255,0.03);
+                }
+                QComboBox#modeCombo::drop-down {
+                  border: 0;
+                  width: 28px;
+                }
+                QComboBox#modeCombo QAbstractItemView {
+                  background: #171d25;
+                  color: #f5efe4;
+                  border: 1px solid rgba(255,255,255,0.10);
+                  selection-background-color: #202734;
                 }
                 QPushButton#vazButton {
                   min-width: 152px;
@@ -725,8 +773,13 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
             paths = [file_info["stored_path"] for file_info in self.staged_files]
             project_name = self._suggest_project_name(paths)
+            output_mode = str(self.output_mode_combo.currentData() or OUTPUT_MODE_RENDER_AND_PREMIERE)
             try:
-                result = self.app_state.create_project_from_paths(paths, name=project_name)
+                result = self.app_state.create_project_from_paths(
+                    paths,
+                    name=project_name,
+                    output_mode=output_mode,
+                )
             except Exception as error:
                 QMessageBox.critical(self, "VAZer", str(error))
                 return
@@ -734,7 +787,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.active_project_id = result["project_id"]
             self.active_job_id = result["job_id"]
             self.staged_files = []
-            self.status_label.setText(f"VAZ gestartet: {project_name}")
+            self.output_mode_combo.setEnabled(False)
+            self.status_label.setText(f"VAZ gestartet: {project_name} | {self._output_mode_label(output_mode)}")
             self.refresh_state()
 
         def confirm_role_review(self) -> None:
@@ -762,6 +816,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             active_project = self._find_active_project()
             active_job = self._find_active_job()
             role_review_payload = self._build_role_review_payload(active_project, active_job)
+            self.output_mode_combo.setEnabled(not self._active_job_is_busy())
             self._update_phase_strip(active_job)
 
             if active_project is None and active_job is None and not self.staged_files:
@@ -779,14 +834,18 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 self.refresh_file_list(files=active_project.get("files") or [], preserve_selection=True)
                 classification = active_project.get("classification") or {}
                 file_count = len(active_project.get("files") or [])
+                output_mode_label = self._output_mode_label(active_project.get("output_mode"))
                 if isinstance(classification, dict) and classification.get("warnings"):
                     warning_text = " | ".join(str(item) for item in classification["warnings"])
-                    self.file_meta.setText(f"{file_count} Datei(en) im Lauf. {warning_text}")
+                    self.file_meta.setText(f"{file_count} Datei(en) im Lauf. Output: {output_mode_label}. {warning_text}")
                 else:
-                    self.file_meta.setText(f"{file_count} Datei(en) im aktuellen Lauf.")
+                    self.file_meta.setText(f"{file_count} Datei(en) im aktuellen Lauf. Output: {output_mode_label}.")
             else:
                 self.refresh_file_list(preserve_selection=True)
-                self.file_meta.setText(f"{len(self.staged_files)} Datei(en) vorgemerkt fuer den naechsten Lauf.")
+                self.file_meta.setText(
+                    f"{len(self.staged_files)} Datei(en) vorgemerkt fuer den naechsten Lauf. "
+                    f"Output: {self._output_mode_label(self.output_mode_combo.currentData())}."
+                )
 
             if active_job is None:
                 self.progress_bar.setValue(0)
@@ -1074,6 +1133,11 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
         def _analysis_status_suffix(self, active_job: dict[str, Any] | None) -> str | None:
             return self._analysis_stage_detail(active_job)
+
+        def _output_mode_label(self, value: Any) -> str:
+            if str(value or "") == OUTPUT_MODE_PREMIERE_ONLY:
+                return "Nur Premiere-Projekt"
+            return "MP4 + Premiere-Projekt"
 
         def _update_phase_strip(self, active_job: dict[str, Any] | None) -> None:
             phase_states = self._build_phase_states(active_job)

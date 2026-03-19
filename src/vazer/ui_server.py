@@ -41,6 +41,40 @@ IGNORED_IMPORT_FILENAMES = {
     "desktop.ini",
 }
 
+OUTPUT_MODE_RENDER_AND_PREMIERE = "render_and_premiere"
+OUTPUT_MODE_PREMIERE_ONLY = "premiere_only"
+
+
+def normalize_output_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {
+        "",
+        OUTPUT_MODE_RENDER_AND_PREMIERE,
+        "render",
+        "mp4",
+        "default",
+        "both",
+        "render+premiere",
+        "mp4+premiere",
+    }:
+        return OUTPUT_MODE_RENDER_AND_PREMIERE
+    if normalized in {
+        OUTPUT_MODE_PREMIERE_ONLY,
+        "premiere",
+        "prproj",
+        "premiere_project",
+        "prproj_only",
+    }:
+        return OUTPUT_MODE_PREMIERE_ONLY
+    raise ValueError(f"Unknown output mode: {value}")
+
+
+def output_mode_label(value: Any) -> str:
+    normalized = normalize_output_mode(value)
+    if normalized == OUTPUT_MODE_PREMIERE_ONLY:
+        return "Nur Premiere-Projekt"
+    return "MP4 + Premiere-Projekt"
+
 
 def should_ignore_import_file(path: Path) -> bool:
     name = path.name.strip()
@@ -59,6 +93,121 @@ def resolve_default_output_dir(paths: list[Path]) -> str | None:
         return None
 
     return str(common_parent) if common_parent.exists() else None
+
+
+def resolve_default_artifacts_dir(paths: list[Path]) -> str | None:
+    return resolve_default_output_dir(paths)
+
+
+def _slugify(value: str) -> str:
+    lowered = str(value or "").strip().lower()
+    collapsed = "".join(character if character.isalnum() else "-" for character in lowered)
+    while "--" in collapsed:
+        collapsed = collapsed.replace("--", "-")
+    return collapsed.strip("-") or "vazer"
+
+
+def _same_media_path(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except Exception:
+        return Path(left).name == Path(right).name
+
+
+def _artifact_layout(project: dict[str, Any], classification: dict[str, Any] | None = None) -> dict[str, Path]:
+    artifacts_root = Path(project["artifacts_path"])
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    master_path = None
+    if isinstance(classification, dict):
+        master_path = classification.get("master_path") or classification.get("master_stored_path")
+    master_stem = Path(str(master_path)).stem if isinstance(master_path, str) and master_path else "master"
+    project_slug = _slugify(str(project.get("name") or "vazer"))
+    return {
+        "root": artifacts_root,
+        "sync_partial_path": artifacts_root / "vazer.sync_map.partial.json",
+        "sync_map_path": artifacts_root / "vazer.sync_map.json",
+        "camera_roles_path": artifacts_root / "vazer.camera_roles.json",
+        "camera_roles_dir": artifacts_root / "vazer.camera_roles",
+        "transcript_path": artifacts_root / f"{master_stem}.transcript.json",
+        "analysis_map_path": artifacts_root / "vazer.analysis_map.json",
+        "planning_root": artifacts_root / f"vazer.{project_slug}.planning",
+        "visual_packet_path": artifacts_root / "vazer.visual_packet.json",
+        "cut_plan_ai_path": artifacts_root / "vazer.cut_plan.ai.json",
+        "cut_validation_path": artifacts_root / "vazer.cut_validation.json",
+        "cut_plan_repaired_path": artifacts_root / "vazer.cut_plan.repaired.json",
+        "cut_plan_render_path": artifacts_root / "vazer.cut_plan.repaired.fhd.json",
+        "render_root": artifacts_root / "vazer.render",
+    }
+
+
+def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_reusable_transcript_artifact(path: Path, master_path: str) -> dict[str, Any] | None:
+    payload = _load_json_if_exists(path)
+    if payload is None or payload.get("schema_version") != "vazer.transcript.v1":
+        return None
+
+    master_audio = payload.get("master_audio") or {}
+    if not isinstance(master_audio, dict) or not _same_media_path(master_audio.get("path"), master_path):
+        return None
+
+    chunks = payload.get("chunks")
+    summary = payload.get("summary") or {}
+    if not isinstance(chunks, list) or not chunks:
+        return None
+    if int(summary.get("chunk_count") or 0) < 1:
+        return None
+
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return None
+
+    try:
+        media_info = probe_media(master_path)
+        duration_seconds = float(media_info.duration_seconds or 0.0)
+    except Exception:
+        duration_seconds = 0.0
+
+    if duration_seconds > 0:
+        chunk_end = max(float(chunk.get("end_seconds") or 0.0) for chunk in chunks if isinstance(chunk, dict))
+        if chunk_end < max(1.0, duration_seconds - 5.0):
+            return None
+
+    return payload
+
+
+def _load_reusable_analysis_map(path: Path, master_path: str, camera_paths: list[str]) -> dict[str, Any] | None:
+    payload = _load_json_if_exists(path)
+    if payload is None or payload.get("schema_version") != "vazer.analysis_map.v1":
+        return None
+
+    master_payload = payload.get("master") or {}
+    if not isinstance(master_payload, dict) or not _same_media_path(master_payload.get("path"), master_path):
+        return None
+
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return None
+
+    analyzed_paths = {
+        str(entry.get("path"))
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("status") == "analyzed" and isinstance(entry.get("path"), str)
+    }
+    if not all(path in analyzed_paths for path in camera_paths):
+        return None
+
+    return payload
 
 INDEX_HTML = """<!doctype html>
 <html lang="de">
@@ -81,7 +230,10 @@ INDEX_HTML = """<!doctype html>
     .drop.dragover{transform:translateY(-1px);border-color:var(--accent2)}
     .drop h2{margin:0 0 10px;font:700 24px/1 var(--display)}
     .actions,.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row{justify-content:space-between}
-    button{appearance:none;border:0;border-radius:999px;padding:11px 16px;font:700 14px var(--font);cursor:pointer}
+    button,select{appearance:none;border:0;border-radius:999px;padding:11px 16px;font:700 14px var(--font)}
+    button{cursor:pointer}
+    select{background:rgba(255,255,255,.06);color:var(--text);border:1px solid var(--line);padding-right:38px}
+    .modeControl{display:flex;gap:10px;align-items:center;color:var(--muted);font-size:13px;font-weight:700;letter-spacing:.03em}
     .solid{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#18110d}.ghost{background:rgba(255,255,255,.06);color:var(--text);border:1px solid var(--line)}button:disabled{opacity:.45;cursor:default}
     .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}
     .metric,.card{background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:16px;padding:14px}
@@ -112,6 +264,7 @@ INDEX_HTML = """<!doctype html>
         <div class="actions" style="margin-top:14px">
           <button class="solid" id="pickButton" type="button">Dateien auswaehlen</button>
           <button class="ghost" id="refreshButton" type="button">Status aktualisieren</button>
+          <label class="modeControl" for="outputMode"><span>Output</span><select id="outputMode"><option value="render_and_premiere">MP4 + Premiere</option><option value="premiere_only">Nur Premiere</option></select></label>
         </div>
       </div>
     </section>
@@ -133,6 +286,7 @@ INDEX_HTML = """<!doctype html>
     const picker=document.getElementById("picker");
     const pickButton=document.getElementById("pickButton");
     const refreshButton=document.getElementById("refreshButton");
+    const outputModeEl=document.getElementById("outputMode");
     const uploadArea=document.getElementById("uploadArea");
     const jobsEl=document.getElementById("jobs");
     const projectsEl=document.getElementById("projects");
@@ -141,14 +295,15 @@ INDEX_HTML = """<!doctype html>
 
     async function fetchJson(url,options={}){const response=await fetch(url,options);const payload=await response.json().catch(()=>({error:response.statusText}));if(!response.ok)throw new Error(payload.error||response.statusText);return payload;}
     function fmtTime(value){return value?new Date(value).toLocaleString("de-DE"):"-";}
+    function outputModeLabel(value){return value==="premiere_only"?"Nur Premiere-Projekt":"MP4 + Premiere-Projekt";}
     function renderMetrics(snapshot){const jobs=snapshot?.jobs||[];const projects=snapshot?.projects||[];const running=jobs.filter(job=>["running","pause_requested","paused"].includes(job.status)).length;const completed=jobs.filter(job=>job.status==="completed").length;metricsEl.innerHTML=[["Projekte",projects.length],["Aktiv",running],["Fertig",completed]].map(metric=>`<div class="metric"><small>${metric[0]}</small><strong>${metric[1]}</strong></div>`).join("");}
     function renderUpload(){if(!state.upload){uploadArea.innerHTML="";return;}const upload=state.upload;const progress=upload.totalBytes>0?Math.min(100,Math.round(upload.sentBytes/upload.totalBytes*100)):0;uploadArea.innerHTML=`<div class="card"><div class="row"><strong>Upload laeuft</strong><span class="badge running">${upload.phase}</span></div><div class="progress"><span style="width:${progress}%"></span></div><div class="mini">${upload.message}</div><div class="meta"><div><strong>Dateien</strong>${upload.fileIndex}/${upload.fileCount}</div><div><strong>Fortschritt</strong>${progress}%</div></div></div>`;}
     function renderJobs(snapshot){const jobs=snapshot?.jobs||[];if(!jobs.length){jobsEl.innerHTML='<div class="muted">Noch keine Jobs. Zieh oben ein paar Clips hinein.</div>';return;}jobsEl.innerHTML=jobs.map(job=>`<div class="card"><div class="row"><strong>${job.project_name}</strong><span class="badge ${job.status}">${job.status.replace("_"," ")}</span></div><div class="progress"><span style="width:${job.progress_percent||0}%"></span></div><div class="mini">${job.stage_label||"wartend"} · ${job.message||"-"}</div><div class="meta"><div><strong>Aktualisiert</strong>${fmtTime(job.updated_at_utc)}</div><div><strong>Fortschritt</strong>${Math.round(job.progress_percent||0)}%</div><div><strong>Master</strong>${job.details?.master_asset||"-"}</div><div><strong>Kameras</strong>${job.details?.camera_count??"-"}</div></div><div class="actions" style="margin-top:12px"><button class="ghost" ${job.status==="running"||job.status==="pause_requested"?"":"disabled"} onclick="pauseJob('${job.id}')">Pause</button><button class="solid" ${job.status==="paused"?"":"disabled"} onclick="resumeJob('${job.id}')">Weiter</button></div></div>`).join("");}
-    function renderProjects(snapshot){const projects=snapshot?.projects||[];if(!projects.length){projectsEl.innerHTML='<div class="muted">Noch keine Projekte im Workspace.</div>';return;}projectsEl.innerHTML=projects.map(project=>{const classification=project.classification||{};const files=(project.files||[]).map(file=>file.original_path).join("<br>");const artifacts=project.artifacts||{};return `<div class="card"><div class="row"><strong>${project.name}</strong><span class="mini">${fmtTime(project.created_at_utc)}</span></div><div class="meta"><div><strong>Master</strong>${classification.master_asset||"nicht erkannt"}</div><div><strong>Kameras</strong>${classification.camera_count??0}</div></div><div class="mini" style="margin-top:8px">${files}</div><div class="mini" style="margin-top:10px">${artifacts.sync_map_path?`sync_map: <code>${artifacts.sync_map_path}</code>`:"Noch kein sync_map geschrieben."}</div></div>`;}).join("");}
+    function renderProjects(snapshot){const projects=snapshot?.projects||[];if(!projects.length){projectsEl.innerHTML='<div class="muted">Noch keine Projekte im Workspace.</div>';return;}projectsEl.innerHTML=projects.map(project=>{const classification=project.classification||{};const files=(project.files||[]).map(file=>file.original_path).join("<br>");const artifacts=project.artifacts||{};const syncLine=artifacts.sync_map_path?`sync_map: <code>${artifacts.sync_map_path}</code>`:"Noch kein sync_map geschrieben.";const premiereLine=artifacts.premiere_project_path?`Premiere: <code>${artifacts.premiere_project_path}</code>`:"Noch kein Premiere-Projekt geschrieben.";return `<div class="card"><div class="row"><strong>${project.name}</strong><span class="mini">${fmtTime(project.created_at_utc)}</span></div><div class="meta"><div><strong>Master</strong>${classification.master_asset||"nicht erkannt"}</div><div><strong>Kameras</strong>${classification.camera_count??0}</div><div><strong>Output</strong>${outputModeLabel(project.output_mode)}</div><div><strong>Projekt</strong>${artifacts.premiere_project_path?"PRPROJ bereit":"In Arbeit"}</div></div><div class="mini" style="margin-top:8px">${files}</div><div class="mini" style="margin-top:10px">${syncLine}<br>${premiereLine}</div></div>`;}).join("");}
     function render(snapshot){state.snapshot=snapshot;workspaceLabel.textContent=snapshot.workspace||"";renderMetrics(snapshot);renderUpload();renderJobs(snapshot);renderProjects(snapshot);}
     async function loadState(){try{render(await fetchJson("/api/state"));}catch(error){console.error(error);}}
     function uploadSingleFile(sessionId,file,index,totalCount,totalBytes,counter){return new Promise((resolve,reject)=>{const path=encodeURIComponent(file.webkitRelativePath||file.name);const xhr=new XMLHttpRequest();xhr.open("POST",`/api/uploads/${sessionId}/files?path=${path}`);xhr.upload.onprogress=(event)=>{if(!state.upload)return;state.upload={...state.upload,phase:"upload",fileIndex:index,fileCount:totalCount,sentBytes:counter.baseBytes+event.loaded,totalBytes,message:`${file.name} wird hochgeladen`};renderUpload();};xhr.onload=()=>{if(xhr.status>=200&&xhr.status<300){counter.baseBytes+=file.size;resolve(JSON.parse(xhr.responseText));return;}reject(new Error(xhr.responseText||`Upload fehlgeschlagen: ${file.name}`));};xhr.onerror=()=>reject(new Error(`Upload fehlgeschlagen: ${file.name}`));xhr.send(file);});}
-    async function handleFiles(fileList){const files=Array.from(fileList||[]);if(!files.length)return;const totalBytes=files.reduce((sum,file)=>sum+file.size,0);state.upload={phase:"vorbereitung",fileIndex:0,fileCount:files.length,sentBytes:0,totalBytes,message:"Upload-Session wird erstellt"};renderUpload();try{const session=await fetchJson("/api/uploads/session",{method:"POST"});const counter={baseBytes:0};for(let index=0;index<files.length;index+=1){await uploadSingleFile(session.session_id,files[index],index+1,files.length,totalBytes,counter);}state.upload={...state.upload,phase:"projekt",sentBytes:totalBytes,message:"Projekt und Hintergrundjob werden angelegt"};renderUpload();const name=(files[0]?.name||"VAZ Projekt").replace(/\\.[^.]+$/,"");await fetchJson("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:session.session_id,name})});}catch(error){alert(error.message);}finally{state.upload=null;renderUpload();await loadState();}}
+    async function handleFiles(fileList){const files=Array.from(fileList||[]);if(!files.length)return;const totalBytes=files.reduce((sum,file)=>sum+file.size,0);state.upload={phase:"vorbereitung",fileIndex:0,fileCount:files.length,sentBytes:0,totalBytes,message:"Upload-Session wird erstellt"};renderUpload();try{const session=await fetchJson("/api/uploads/session",{method:"POST"});const counter={baseBytes:0};for(let index=0;index<files.length;index+=1){await uploadSingleFile(session.session_id,files[index],index+1,files.length,totalBytes,counter);}state.upload={...state.upload,phase:"projekt",sentBytes:totalBytes,message:"Projekt und Hintergrundjob werden angelegt"};renderUpload();const name=(files[0]?.name||"VAZ Projekt").replace(/\\.[^.]+$/,"");await fetchJson("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:session.session_id,name,output_mode:outputModeEl?.value||"render_and_premiere"})});}catch(error){alert(error.message);}finally{state.upload=null;renderUpload();await loadState();}}
     async function pauseJob(jobId){await fetchJson(`/api/jobs/${jobId}/pause`,{method:"POST"});await loadState();}
     async function resumeJob(jobId){await fetchJson(`/api/jobs/${jobId}/resume`,{method:"POST"});await loadState();}
     window.pauseJob=pauseJob;window.resumeJob=resumeJob;
@@ -291,6 +446,9 @@ class UIState:
 
         for project in payload.get("projects", []) if isinstance(payload.get("projects"), list) else []:
             if isinstance(project, dict) and isinstance(project.get("id"), str):
+                project["output_mode"] = normalize_output_mode(project.get("output_mode"))
+                if not isinstance(project.get("artifacts_path"), str) or not project.get("artifacts_path"):
+                    project["artifacts_path"] = str(Path(project["root_path"]) / "artifacts")
                 self._projects[project["id"]] = project
 
         for job in payload.get("jobs", []) if isinstance(payload.get("jobs"), list) else []:
@@ -362,7 +520,12 @@ class UIState:
             "size_bytes": destination.stat().st_size,
         }
 
-    def create_project(self, session_id: str, name: str | None = None) -> dict[str, Any]:
+    def create_project(
+        self,
+        session_id: str,
+        name: str | None = None,
+        output_mode: str | None = None,
+    ) -> dict[str, Any]:
         session_dir = self.sessions_root / session_id
         if not session_dir.exists():
             raise ValueError("Unknown upload session.")
@@ -375,6 +538,7 @@ class UIState:
 
         project_id = f"proj_{uuid.uuid4().hex[:10]}"
         project_name = (name or f"Projekt {datetime.now().strftime('%Y-%m-%d %H-%M')}").strip() or project_id
+        normalized_output_mode = normalize_output_mode(output_mode)
         project_root = self.projects_root / project_id
         inputs_root = project_root / "inputs"
         artifacts_root = project_root / "artifacts"
@@ -399,10 +563,17 @@ class UIState:
             project_root=project_root,
             inputs_path=str(inputs_root),
             default_output_dir=None,
+            artifacts_path_override=None,
             files=files,
+            output_mode=normalized_output_mode,
         )
 
-    def create_project_from_paths(self, paths: list[str], name: str | None = None) -> dict[str, Any]:
+    def create_project_from_paths(
+        self,
+        paths: list[str],
+        name: str | None = None,
+        output_mode: str | None = None,
+    ) -> dict[str, Any]:
         resolved_paths = [
             Path(path).expanduser().resolve()
             for path in paths
@@ -416,6 +587,7 @@ class UIState:
 
         project_id = f"proj_{uuid.uuid4().hex[:10]}"
         project_name = (name or resolved_paths[0].stem or project_id).strip() or project_id
+        normalized_output_mode = normalize_output_mode(output_mode)
         project_root = self.projects_root / project_id
         project_root.mkdir(parents=True, exist_ok=True)
         files = [
@@ -435,7 +607,9 @@ class UIState:
             project_root=project_root,
             inputs_path=None,
             default_output_dir=resolve_default_output_dir(resolved_paths),
+            artifacts_path_override=resolve_default_artifacts_dir(resolved_paths),
             files=files,
+            output_mode=normalized_output_mode,
         )
 
     def _register_project_and_start_job(
@@ -446,11 +620,18 @@ class UIState:
         project_root: Path,
         inputs_path: str | None,
         default_output_dir: str | None,
+        artifacts_path_override: str | None,
         files: list[dict[str, Any]],
+        output_mode: str,
     ) -> dict[str, Any]:
-        artifacts_root = project_root / "artifacts"
+        artifacts_root = (
+            Path(artifacts_path_override).expanduser().resolve()
+            if artifacts_path_override
+            else project_root / "artifacts"
+        )
         artifacts_root.mkdir(parents=True, exist_ok=True)
         fallback_output_dir = project_root / "output"
+        normalized_output_mode = normalize_output_mode(output_mode)
         project = {
             "schema_version": "vazer.ui_project.v1",
             "id": project_id,
@@ -461,6 +642,7 @@ class UIState:
             "inputs_path": inputs_path,
             "artifacts_path": str(artifacts_root),
             "default_output_dir": default_output_dir or str(fallback_output_dir),
+            "output_mode": normalized_output_mode,
             "files": files,
             "classification": {},
             "artifacts": {},
@@ -483,6 +665,7 @@ class UIState:
                 "file_count": len(project["files"]),
                 "camera_count": 0,
                 "master_asset": None,
+                "output_mode": normalized_output_mode,
             },
             "artifacts": {},
         }
@@ -496,6 +679,7 @@ class UIState:
                 "pause_requested": False,
                 "awaiting_confirmation": False,
                 "cancel_requested": False,
+                "executor": None,
             }
             self._persist_state()
 
@@ -585,6 +769,7 @@ class UIState:
                 for job_id, job in self._jobs.items()
                 if job.get("status") in {"queued", "running", "pause_requested", "paused", "review_required"}
             ]
+            runtimes = [self._runtimes.get(job_id) for job_id in active_job_ids]
 
         for job_id in active_job_ids:
             try:
@@ -592,7 +777,37 @@ class UIState:
             except Exception:
                 pass
 
+        executors = []
+        threads = []
+        for runtime in runtimes:
+            if not isinstance(runtime, dict):
+                continue
+            executor = runtime.get("executor")
+            thread = runtime.get("thread")
+            if executor is not None:
+                executors.append(executor)
+            if isinstance(thread, threading.Thread):
+                threads.append(thread)
+            condition = runtime.get("condition")
+            if isinstance(condition, threading.Condition):
+                with condition:
+                    condition.notify_all()
+
+        for executor in executors:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+            except Exception:
+                pass
+
         terminate_registered_processes()
+
+        for thread in threads:
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                pass
 
     def _update_project(self, project_id: str, **changes: Any) -> None:
         with self._lock:
@@ -752,6 +967,7 @@ class UIState:
             classification = self._classify_files(files)
             self._update_project(project_id, files=files, classification=classification)
             self._write_project_manifest(project_id)
+            artifact_paths = _artifact_layout(self._projects[project_id], classification)
             self._update_job(
                 job_id,
                 stage="classified",
@@ -935,10 +1151,12 @@ class UIState:
         }
 
     def _run_project_job_v2(self, project_id: str, job_id: str) -> None:
+        media_executor = None
         try:
             with self._lock:
                 project = self._projects[project_id]
                 files = list(project["files"])
+                output_mode = normalize_output_mode(project.get("output_mode"))
             total_files = max(1, len(files))
             artifacts_root = Path(self._projects[project_id]["artifacts_path"])
 
@@ -1009,6 +1227,7 @@ class UIState:
                     "file_count": len(files),
                     "camera_count": classification["camera_count"],
                     "master_asset": classification["master_asset"],
+                    "output_mode": output_mode,
                 },
             )
 
@@ -1032,8 +1251,8 @@ class UIState:
                         extra_fields={"asset_id": asset_id},
                     )
 
-                camera_role_path = artifacts_root / "camera_roles.json"
-                role_frame_dir = artifacts_root / "camera_roles"
+                camera_role_path = artifact_paths["camera_roles_path"]
+                role_frame_dir = artifact_paths["camera_roles_dir"]
                 try:
                     camera_role_artifact = build_camera_role_artifact(
                         [
@@ -1153,9 +1372,48 @@ class UIState:
             transcription_options = TranscriptionOptions(model="whisper-1")
             entries: list[dict[str, Any]] = []
             master_summary: dict[str, Any] | None = None
-            partial_path = artifacts_root / "sync_map.partial.json"
+            partial_path = artifact_paths["sync_partial_path"]
             analysis_futures: dict[str, Future[dict[str, Any]]] = {}
             transcript_future: Future[dict[str, Any]] | None = None
+            reusable_transcript = _load_reusable_transcript_artifact(artifact_paths["transcript_path"], str(master_path))
+            reusable_analysis_map = _load_reusable_analysis_map(artifact_paths["analysis_map_path"], str(master_path), camera_path_list)
+
+            if reusable_transcript is None:
+                with self._lock:
+                    cached_transcript_paths = [
+                        Path(str(other_project.get("artifacts", {}).get("transcript_path")))
+                        for other_project in self._projects.values()
+                        if other_project.get("id") != project_id and other_project.get("artifacts", {}).get("transcript_path")
+                    ]
+                for candidate_path in cached_transcript_paths:
+                    candidate_payload = _load_reusable_transcript_artifact(candidate_path, str(master_path))
+                    if candidate_payload is None:
+                        continue
+                    try:
+                        artifact_paths["transcript_path"].write_bytes(candidate_path.read_bytes())
+                    except Exception:
+                        continue
+                    reusable_transcript = candidate_payload
+                    break
+
+            if reusable_analysis_map is None:
+                with self._lock:
+                    cached_analysis_paths = [
+                        Path(str(other_project.get("artifacts", {}).get("analysis_map_path")))
+                        for other_project in self._projects.values()
+                        if other_project.get("id") != project_id and other_project.get("artifacts", {}).get("analysis_map_path")
+                    ]
+                for candidate_path in cached_analysis_paths:
+                    candidate_payload = _load_reusable_analysis_map(candidate_path, str(master_path), camera_path_list)
+                    if candidate_payload is None:
+                        continue
+                    try:
+                        artifact_paths["analysis_map_path"].write_bytes(candidate_path.read_bytes())
+                    except Exception:
+                        continue
+                    reusable_analysis_map = candidate_payload
+                    break
+
             media_progress_lock = threading.Lock()
             analysis_progress_by_asset = {asset_id_by_path[path]: 0.0 for path in camera_path_list}
             media_progress: dict[str, dict[str, Any]] = {
@@ -1319,24 +1577,50 @@ class UIState:
                 return result
 
             media_executor = ThreadPoolExecutor(max_workers=max(2, min(len(camera_path_list) + 1, 4)))
-            self._update_project_file(
-                project_id,
-                master_path,
-                ui_status="transcribing",
-                ui_note="Preparing Whisper transcript.",
-                extra_fields={
-                    "ui_progress_percent": 0.0,
-                    "ui_progress_label": "Whisper",
-                    "ui_progress_color": "#70abff",
-                },
-            )
-            transcript_future = media_executor.submit(
-                build_master_transcript,
-                master_path,
-                source_sync_map_path=None,
-                options=transcription_options,
-                on_progress=_transcript_progress,
-            )
+            with self._lock:
+                runtime = self._runtimes.get(job_id)
+                if isinstance(runtime, dict):
+                    runtime["executor"] = media_executor
+            if reusable_transcript is None:
+                self._update_project_file(
+                    project_id,
+                    master_path,
+                    ui_status="transcribing",
+                    ui_note="Preparing Whisper transcript.",
+                    extra_fields={
+                        "ui_progress_percent": 0.0,
+                        "ui_progress_label": "Whisper",
+                        "ui_progress_color": "#70abff",
+                    },
+                )
+                transcript_future = media_executor.submit(
+                    build_master_transcript,
+                    master_path,
+                    source_sync_map_path=None,
+                    options=transcription_options,
+                    on_progress=_transcript_progress,
+                )
+            else:
+                self._update_project_file(
+                    project_id,
+                    master_path,
+                    ui_status="master",
+                    ui_note=f"Using existing transcript: {artifact_paths['transcript_path'].name}",
+                    extra_fields={
+                        "ui_progress_percent": 100.0,
+                        "ui_progress_label": "Whisper",
+                        "ui_progress_color": "#63c178",
+                    },
+                )
+                self._update_project(
+                    project_id,
+                    artifacts={
+                        **self._projects[project_id]["artifacts"],
+                        "transcript_path": str(artifact_paths["transcript_path"]),
+                    },
+                )
+                self._write_project_manifest(project_id)
+                _set_media_progress("transcript", 100.0, "Using existing transcript.", "done")
             _publish_media_progress()
 
             for index, camera_path in enumerate(camera_path_list, start=1):
@@ -1411,12 +1695,13 @@ class UIState:
                         },
                     )
                     if entry_status == "synced":
-                        analysis_futures[asset_id] = media_executor.submit(
-                            _run_camera_analysis,
-                            sync_entry,
-                            camera_path,
-                            role,
-                        )
+                        if reusable_analysis_map is None:
+                            analysis_futures[asset_id] = media_executor.submit(
+                                _run_camera_analysis,
+                                sync_entry,
+                                camera_path,
+                                role,
+                            )
                     else:
                         analysis_progress_by_asset[asset_id] = 100.0
 
@@ -1470,7 +1755,7 @@ class UIState:
                 )
 
             final_sync_map = json.loads(partial_path.read_text(encoding="utf-8-sig"))
-            sync_map_path = artifacts_root / "sync_map.json"
+            sync_map_path = artifact_paths["sync_map_path"]
             write_sync_map(final_sync_map, str(sync_map_path))
             self._update_project(
                 project_id,
@@ -1484,14 +1769,14 @@ class UIState:
             project_root = Path(self._projects[project_id]["root_path"])
             role_overrides = dict(classification.get("camera_roles") or {})
 
-            transcript_artifact = transcript_future.result() if transcript_future is not None else None
+            transcript_artifact = reusable_transcript if transcript_future is None else transcript_future.result()
             if transcript_artifact is None:
                 raise ValueError("Transcript task did not return a result.")
             transcript_artifact["source_sync_map"] = {
                 "schema_version": "vazer.sync_map.v1",
                 "path": str(sync_map_path),
             }
-            transcript_path = artifacts_root / "transcript.json"
+            transcript_path = artifact_paths["transcript_path"]
             write_transcript_artifact(transcript_artifact, str(transcript_path))
             self._update_project_file(
                 project_id,
@@ -1514,36 +1799,75 @@ class UIState:
             self._write_project_manifest(project_id)
             _set_media_progress("transcript", 100.0, "Transcript complete.", "done")
 
-            master_signals = analyze_master_audio_activity(master_path, analysis_options)
-            analyzed_entries: list[dict[str, Any]] = []
-            for entry in final_sync_map.get("entries", []):
-                if not isinstance(entry, dict) or entry.get("status") != "synced":
-                    continue
-                asset_id = str(entry.get("asset_id"))
-                future = analysis_futures.get(asset_id)
-                if future is None:
-                    continue
-                analyzed_entries.append(future.result())
+            analysis_map_path = artifact_paths["analysis_map_path"]
+            if reusable_analysis_map is not None:
+                analysis_map = reusable_analysis_map
+                self._update_project(
+                    project_id,
+                    artifacts={
+                        **self._projects[project_id]["artifacts"],
+                        "analysis_map_path": str(analysis_map_path),
+                    },
+                )
+                for entry in final_sync_map.get("entries", []):
+                    if not isinstance(entry, dict) or entry.get("status") != "synced":
+                        continue
+                    camera_path = str(entry.get("path") or "")
+                    role = classification["camera_roles"].get(str(entry.get("asset_id")))
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status="analyzed",
+                        ui_note=_format_camera_note(role, "Using existing analysis map."),
+                        extra_fields={
+                            "ui_progress_percent": 100.0,
+                            "ui_progress_label": "CV",
+                            "ui_progress_color": "#63c178",
+                            "ui_sub_progress": [
+                                {
+                                    "label": "Global",
+                                    "percent": 100.0,
+                                    "color": "#63c178",
+                                }
+                            ],
+                        },
+                    )
+                self._write_project_manifest(project_id)
+                _set_media_progress("analysis", 100.0, "Using existing analysis map.", "done")
+            else:
+                master_signals = analyze_master_audio_activity(master_path, analysis_options)
+                analyzed_entries: list[dict[str, Any]] = []
+                for entry in final_sync_map.get("entries", []):
+                    if not isinstance(entry, dict) or entry.get("status") != "synced":
+                        continue
+                    asset_id = str(entry.get("asset_id"))
+                    future = analysis_futures.get(asset_id)
+                    if future is None:
+                        continue
+                    analyzed_entries.append(future.result())
 
-            analysis_map = compose_analysis_map(
-                final_sync_map,
-                source_sync_map_path=str(sync_map_path),
-                options=analysis_options,
-                master_signals=master_signals,
-                analyzed_entries=analyzed_entries,
-            )
-            analysis_map_path = artifacts_root / "analysis_map.json"
-            write_analysis_map(analysis_map, str(analysis_map_path))
-            self._update_project(
-                project_id,
-                artifacts={
-                    **self._projects[project_id]["artifacts"],
-                    "analysis_map_path": str(analysis_map_path),
-                },
-            )
-            self._write_project_manifest(project_id)
-            _set_media_progress("analysis", 100.0, "Analysis complete.", "done")
+                analysis_map = compose_analysis_map(
+                    final_sync_map,
+                    source_sync_map_path=str(sync_map_path),
+                    options=analysis_options,
+                    master_signals=master_signals,
+                    analyzed_entries=analyzed_entries,
+                )
+                write_analysis_map(analysis_map, str(analysis_map_path))
+                self._update_project(
+                    project_id,
+                    artifacts={
+                        **self._projects[project_id]["artifacts"],
+                        "analysis_map_path": str(analysis_map_path),
+                    },
+                )
+                self._write_project_manifest(project_id)
+                _set_media_progress("analysis", 100.0, "Analysis complete.", "done")
             media_executor.shutdown(wait=True)
+            with self._lock:
+                runtime = self._runtimes.get(job_id)
+                if isinstance(runtime, dict):
+                    runtime["executor"] = None
 
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
@@ -1554,7 +1878,7 @@ class UIState:
                 message="Building chunked AI draft for the full theater recording.",
                 progress_percent=74.0,
             )
-            planning_root = artifacts_root / "planning"
+            planning_root = artifact_paths["planning_root"]
             draft_bundle = build_chunked_ai_draft_bundle(
                 final_sync_map,
                 source_sync_map_path=str(sync_map_path),
@@ -1566,13 +1890,13 @@ class UIState:
                 output_dir=str(planning_root),
                 options=TheaterPipelineOptions(),
             )
-            visual_packet_path = planning_root / "visual_packet.json"
+            visual_packet_path = artifact_paths["visual_packet_path"]
             write_visual_packet(draft_bundle["visual_packet"], str(visual_packet_path))
             for chunk_index, chunk_plan in enumerate(draft_bundle["chunk_plans"], start=1):
                 chunk_path = planning_root / "chunks" / f"chunk_{chunk_index:04d}.cut_plan.ai.json"
                 write_cut_plan(chunk_plan, str(chunk_path))
             ai_cut_plan = draft_bundle["combined_cut_plan"]
-            ai_cut_plan_path = artifacts_root / "cut_plan.ai.json"
+            ai_cut_plan_path = artifact_paths["cut_plan_ai_path"]
             write_cut_plan(ai_cut_plan, str(ai_cut_plan_path))
             self._update_project(
                 project_id,
@@ -1618,7 +1942,7 @@ class UIState:
                 options=CutValidationOptions(),
                 on_progress=_validation_progress,
             )
-            validation_path = artifacts_root / "cut_validation.json"
+            validation_path = artifact_paths["cut_validation_path"]
             write_cut_validation_report(validation_report, str(validation_path))
 
             self._wait_if_paused(job_id)
@@ -1640,10 +1964,10 @@ class UIState:
                 transcript_artifact=transcript_artifact,
                 options=CutValidationOptions(),
             )
-            repaired_cut_plan_path = artifacts_root / "cut_plan.repaired.json"
+            repaired_cut_plan_path = artifact_paths["cut_plan_repaired_path"]
             write_cut_plan(repaired_cut_plan, str(repaired_cut_plan_path))
             render_ready_cut_plan = apply_max_render_size(repaired_cut_plan, max_width=1920, max_height=1080)
-            render_ready_cut_plan_path = artifacts_root / "cut_plan.repaired.fhd.json"
+            render_ready_cut_plan_path = artifact_paths["cut_plan_render_path"]
             write_cut_plan(render_ready_cut_plan, str(render_ready_cut_plan_path))
             self._update_project(
                 project_id,
@@ -1656,9 +1980,18 @@ class UIState:
             )
             self._write_project_manifest(project_id)
 
+            self._wait_if_paused(job_id)
+            self._raise_if_canceled(job_id)
             output_root = Path(project.get("default_output_dir") or (project_root / "output"))
             output_root.mkdir(parents=True, exist_ok=True)
             premiere_project_path = output_root / f"{project['name']}.prproj"
+            self._update_job(
+                job_id,
+                stage="exporting_premiere",
+                stage_label="Premiere",
+                message="Writing Premiere project file.",
+                progress_percent=89.0,
+            )
             premiere_summary = export_premiere_project(
                 repaired_cut_plan,
                 output_project_path=str(premiere_project_path),
@@ -1677,6 +2010,38 @@ class UIState:
             )
             self._write_project_manifest(project_id)
 
+            if output_mode == OUTPUT_MODE_PREMIERE_ONLY:
+                self._update_job(
+                    job_id,
+                    status="completed",
+                    stage="completed",
+                    stage_label="Done",
+                    message=(
+                        f"Premiere export complete. "
+                        f"{final_sync_map['summary']['synced']} synced, "
+                        f"{validation_report['summary']['fail']} failed cuts after validation. "
+                        f"Output: {premiere_project_path}"
+                    ),
+                    progress_percent=100.0,
+                    artifacts={
+                        "sync_map_path": str(sync_map_path),
+                        "transcript_path": str(transcript_path),
+                        "analysis_map_path": str(analysis_map_path),
+                        "visual_packet_path": str(visual_packet_path),
+                        "cut_plan_ai_path": str(ai_cut_plan_path),
+                        "cut_validation_path": str(validation_path),
+                        "cut_plan_repaired_path": str(repaired_cut_plan_path),
+                        "premiere_project_path": str(premiere_summary["output"]["path"]),
+                    },
+                    details={
+                        "file_count": len(files),
+                        "camera_count": classification["camera_count"],
+                        "master_asset": classification["master_asset"],
+                        "output_mode": output_mode,
+                    },
+                )
+                return
+
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
             self._update_job(
@@ -1691,7 +2056,7 @@ class UIState:
                 render_ready_cut_plan,
                 cut_plan_path=str(render_ready_cut_plan_path),
                 output_media_path=str(output_media_path),
-                scaffold_dir=str(artifacts_root / "render"),
+                scaffold_dir=str(artifact_paths["render_root"]),
             )
 
             def _render_progress(progress_percent: float, _state: str) -> None:
@@ -1741,8 +2106,11 @@ class UIState:
                     "file_count": len(files),
                     "camera_count": classification["camera_count"],
                     "master_asset": classification["master_asset"],
+                    "output_mode": output_mode,
                 },
             )
+        except JobCanceledError:
+            return
         except Exception as error:
             self._update_job(
                 job_id,
@@ -1751,6 +2119,18 @@ class UIState:
                 stage_label="Error",
                 message=str(error),
             )
+        finally:
+            if media_executor is not None:
+                try:
+                    media_executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    media_executor.shutdown(wait=False)
+                except Exception:
+                    pass
+            with self._lock:
+                runtime = self._runtimes.get(job_id)
+                if isinstance(runtime, dict):
+                    runtime["executor"] = None
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -1823,6 +2203,7 @@ def create_ui_handler(app_state: UIState) -> type[BaseHTTPRequestHandler]:
                         app_state.create_project(
                             str(payload.get("session_id") or ""),
                             None if payload.get("name") is None else str(payload.get("name")),
+                            None if payload.get("output_mode") is None else str(payload.get("output_mode")),
                         ),
                     )
                     return

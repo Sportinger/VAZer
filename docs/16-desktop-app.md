@@ -50,7 +50,9 @@ Das heisst:
 - kein Browser-Upload
 - keine Kopie ins Workspace nur fuer den Import
 - kein separater HTTP-Server im Desktop-Modus
-- Projektartefakte liegen trotzdem im lokalen VAZer-Workspace
+- bei Referenzprojekten liegen die wichtigsten Artefakte jetzt standardmaessig direkt im gemeinsamen Quellordner
+- vorhandene Artefakte im Quellordner werden nach Moeglichkeit wiederverwendet
+- vorhandene Transcript-/Analysis-Artefakte aus aelteren Workspace-Projekten koennen in den Quellordner zurueckkopiert und dort weiterverwendet werden
 - der finale Render landet bei Desktop-Referenzprojekten standardmaessig im gemeinsamen Quellordner
 - wenn die Quelldateien aus verschiedenen Ordnern kommen, faellt VAZer auf den Projekt-Workspace als Output-Ziel zurueck
 - offensichtliche Sidecar-/Hidden-Dateien wie `._*.MXF` werden beim Import ignoriert
@@ -78,14 +80,14 @@ Der Desktop-Job macht bisher:
 
 Artefakte:
 
-- `camera_roles.json`
-- `sync_map.json`
-- `transcript.json`
-- `analysis_map.json`
-- `visual_packet.json`
-- `cut_plan.ai.json`
-- `cut_validation.json`
-- `cut_plan.repaired.json`
+- `vazer.camera_roles.json`
+- `vazer.sync_map.json`
+- `<master>.transcript.json`
+- `vazer.analysis_map.json`
+- `vazer.visual_packet.json`
+- `vazer.cut_plan.ai.json`
+- `vazer.cut_validation.json`
+- `vazer.cut_plan.repaired.json`
 - finaler FHD-Render im Projektordner
 
 ## Was noch fehlt
