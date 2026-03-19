@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import atexit
+import ctypes
+from ctypes import wintypes
 import os
 import subprocess
 import threading
@@ -7,6 +10,88 @@ from typing import Any
 
 _LOCK = threading.Lock()
 _ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
+_JOB_HANDLE: int | None = None
+
+if os.name == "nt":
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    JobObjectExtendedLimitInformation = 9
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_uint64),
+            ("WriteOperationCount", ctypes.c_uint64),
+            ("OtherOperationCount", ctypes.c_uint64),
+            ("ReadTransferCount", ctypes.c_uint64),
+            ("WriteTransferCount", ctypes.c_uint64),
+            ("OtherTransferCount", ctypes.c_uint64),
+        ]
+
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+            ("IoInfo", IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+
+def _job_handle() -> int | None:
+    global _JOB_HANDLE
+    if os.name != "nt":
+        return None
+    if _JOB_HANDLE is not None:
+        return _JOB_HANDLE
+
+    handle = kernel32.CreateJobObjectW(None, None)
+    if not handle:
+        return None
+
+    info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    ok = kernel32.SetInformationJobObject(
+        handle,
+        JobObjectExtendedLimitInformation,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    )
+    if not ok:
+        kernel32.CloseHandle(handle)
+        return None
+
+    _JOB_HANDLE = int(handle)
+    return _JOB_HANDLE
+
+
+def _assign_process_to_job(process: subprocess.Popen[Any]) -> None:
+    if os.name != "nt":
+        return
+    handle = _job_handle()
+    if handle is None:
+        return
+    try:
+        kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(int(process._handle)))
+    except Exception:
+        return
 
 
 def _apply_windows_no_window(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -49,6 +134,7 @@ def run_managed(
         errors=errors,
         **kwargs,
     )
+    _assign_process_to_job(process)
     with _LOCK:
         _ACTIVE_PROCESSES[process.pid] = process
 
@@ -75,6 +161,7 @@ def popen_managed(
 ) -> subprocess.Popen[Any]:
     kwargs = _apply_windows_no_window(kwargs)
     process = subprocess.Popen(args, **kwargs)
+    _assign_process_to_job(process)
     with _LOCK:
         _ACTIVE_PROCESSES[process.pid] = process
     return process
@@ -113,3 +200,19 @@ def terminate_registered_processes(*, timeout_seconds: float = 3.0) -> None:
                 pass
         finally:
             unregister_process(process)
+
+
+def _shutdown_process_manager() -> None:
+    terminate_registered_processes()
+    if os.name != "nt":
+        return
+    global _JOB_HANDLE
+    if _JOB_HANDLE is not None:
+        try:
+            kernel32.CloseHandle(_JOB_HANDLE)
+        except Exception:
+            pass
+        _JOB_HANDLE = None
+
+
+atexit.register(_shutdown_process_manager)

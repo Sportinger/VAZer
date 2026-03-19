@@ -22,6 +22,7 @@ class StreamRequest:
     sample_fps: float
     max_width: int
     max_height: int | None = None
+    decoder_preference: str = "auto"
     prefer_gpu: bool = True
     prefer_opencv_fallback: bool = True
 
@@ -306,14 +307,21 @@ class SequentialGrayFrameReader:
             "decode_attempts": [],
         }
 
+        hwaccels = set(probe_ffmpeg_hwaccels())
+        normalized = str(self.request.decoder_preference or "auto").strip().lower()
         attempts: list[str | None] = []
-        if self.request.prefer_gpu:
-            hwaccels = set(probe_ffmpeg_hwaccels())
-            if "cuda" in hwaccels:
-                attempts.append("cuda")
-            if "auto" in hwaccels:
-                attempts.append("auto")
-        attempts.append(None)
+        if normalized == "cpu":
+            attempts = [None]
+        elif normalized == "cuda":
+            attempts = ["cuda"] if "cuda" in hwaccels else []
+            attempts.append(None)
+        else:
+            if self.request.prefer_gpu:
+                if "cuda" in hwaccels:
+                    attempts.append("cuda")
+                if "auto" in hwaccels:
+                    attempts.append("auto")
+            attempts.append(None)
         self._attempts = attempts
         if not self._attempts:
             raise ValueError(f"Unable to open decode stream for {self.path}.")

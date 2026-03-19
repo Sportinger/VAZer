@@ -26,6 +26,7 @@ from .camera_roles import build_camera_role_artifact, infer_camera_role_from_nam
 from .cut_plan import write_cut_plan
 from .cut_review import CutValidationOptions, build_cut_validation_report, repair_cut_plan, write_cut_validation_report
 from .fftools import MediaInfo, probe_media
+from .premiere import export_premiere_project
 from .process_manager import terminate_registered_processes
 from .render import apply_max_render_size, build_render_scaffold, run_render
 from .sync import SyncOptions, analyze_sync
@@ -1202,6 +1203,8 @@ class UIState:
                     message=" | ".join(parts) or "Preparing media tasks.",
                     progress_percent=overall_progress,
                     parallel_progress=snapshot,
+                    analysis_pass="global",
+                    analysis_progress=snapshot.get("analysis"),
                 )
 
             def _set_media_progress(task_id: str, progress_percent: float, detail: str, status: str) -> None:
@@ -1238,9 +1241,16 @@ class UIState:
                         "ui_progress_percent": progress_percent,
                         "ui_progress_label": "CV",
                         "ui_progress_color": "#63c178",
+                        "ui_sub_progress": [
+                            {
+                                "label": "Global",
+                                "percent": progress_percent,
+                                "color": "#63c178",
+                            }
+                        ],
                     },
                 )
-                _set_media_progress("analysis", aggregate, "Analyzing synced cameras.", "running")
+                _set_media_progress("analysis", aggregate, detail, "running")
 
             def _run_camera_analysis(sync_entry: dict[str, Any], camera_path: str, role: str | None) -> dict[str, Any]:
                 asset_id = sync_entry["asset_id"]
@@ -1268,6 +1278,13 @@ class UIState:
                             "ui_progress_percent": 100.0,
                             "ui_progress_label": "CV",
                             "ui_progress_color": "#e26060",
+                            "ui_sub_progress": [
+                                {
+                                    "label": "Global",
+                                    "percent": 100.0,
+                                    "color": "#e26060",
+                                }
+                            ],
                         },
                     )
                     _set_media_progress("analysis", aggregate, "Analyzing synced cameras.", "running")
@@ -1289,6 +1306,13 @@ class UIState:
                         "ui_progress_percent": 100.0,
                         "ui_progress_label": "CV",
                         "ui_progress_color": "#63c178",
+                        "ui_sub_progress": [
+                            {
+                                "label": "Global",
+                                "percent": 100.0,
+                                "color": "#63c178",
+                            }
+                        ],
                     },
                 )
                 _set_media_progress("analysis", aggregate, "Analyzing synced cameras.", "running")
@@ -1568,7 +1592,20 @@ class UIState:
                 stage_label="Cuts pruefen",
                 message="Validating proposed cut points.",
                 progress_percent=82.0,
+                analysis_pass="local",
             )
+
+            def _validation_progress(completed: int, total: int, detail: str) -> None:
+                local_progress = 100.0 * completed / max(1, total)
+                self._update_job(
+                    job_id,
+                    stage="validate",
+                    stage_label="Cuts pruefen",
+                    message=detail,
+                    progress_percent=82.0 + 4.0 * (local_progress / 100.0),
+                    analysis_pass="local",
+                )
+
             validation_report = build_cut_validation_report(
                 ai_cut_plan,
                 sync_map=final_sync_map,
@@ -1579,6 +1616,7 @@ class UIState:
                 transcript_artifact=transcript_artifact,
                 source_transcript_path=str(transcript_path),
                 options=CutValidationOptions(),
+                on_progress=_validation_progress,
             )
             validation_path = artifacts_root / "cut_validation.json"
             write_cut_validation_report(validation_report, str(validation_path))
@@ -1618,6 +1656,27 @@ class UIState:
             )
             self._write_project_manifest(project_id)
 
+            output_root = Path(project.get("default_output_dir") or (project_root / "output"))
+            output_root.mkdir(parents=True, exist_ok=True)
+            premiere_project_path = output_root / f"{project['name']}.prproj"
+            premiere_summary = export_premiere_project(
+                repaired_cut_plan,
+                output_project_path=str(premiere_project_path),
+                cut_plan_path=str(repaired_cut_plan_path),
+                project_name=project["name"],
+            )
+            self._update_project(
+                project_id,
+                artifacts={
+                    **self._projects[project_id]["artifacts"],
+                    "cut_validation_path": str(validation_path),
+                    "cut_plan_repaired_path": str(repaired_cut_plan_path),
+                    "cut_plan_render_path": str(render_ready_cut_plan_path),
+                    "premiere_project_path": str(premiere_project_path),
+                },
+            )
+            self._write_project_manifest(project_id)
+
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
             self._update_job(
@@ -1627,8 +1686,6 @@ class UIState:
                 message="Rendering final FHD cut.",
                 progress_percent=90.0,
             )
-            output_root = Path(project.get("default_output_dir") or (project_root / "output"))
-            output_root.mkdir(parents=True, exist_ok=True)
             output_media_path = output_root / f"{project['name']}.fhd.mp4"
             render_manifest = build_render_scaffold(
                 render_ready_cut_plan,
@@ -1677,6 +1734,7 @@ class UIState:
                     "cut_plan_ai_path": str(ai_cut_plan_path),
                     "cut_validation_path": str(validation_path),
                     "cut_plan_repaired_path": str(repaired_cut_plan_path),
+                    "premiere_project_path": str(premiere_summary["output"]["path"]),
                     "render_output_path": str(output_media_path),
                 },
                 details={

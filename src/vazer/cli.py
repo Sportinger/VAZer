@@ -21,6 +21,7 @@ from .cut_review import (
     write_cut_validation_report,
 )
 from .desktop_app import launch_desktop_app
+from .premiere import export_premiere_project
 from .render import build_render_scaffold, load_cut_plan
 from .sample_set import SampleSetOptions, build_sample_set
 from .sync import SyncOptions, analyze_sync
@@ -137,6 +138,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default=CutValidationOptions().local_probe_width,
         help="Maximum width for sparse cut-frame probes.",
     )
+    validate_parser.add_argument(
+        "--local-dense-context",
+        type=float,
+        default=CutValidationOptions().local_dense_context_seconds,
+        help="Local source-time context around each cut for dense probe analysis.",
+    )
+    validate_parser.add_argument(
+        "--local-dense-fps",
+        type=float,
+        default=CutValidationOptions().local_dense_fps,
+        help="Dense local analysis FPS around each cut.",
+    )
+    validate_parser.add_argument(
+        "--local-dense-width",
+        type=int,
+        default=CutValidationOptions().local_dense_width,
+        help="Maximum width for dense local cut analysis.",
+    )
+    validate_parser.add_argument(
+        "--local-dense-decoder",
+        choices=["auto", "cuda", "cpu"],
+        default=CutValidationOptions().local_dense_decoder_preference,
+        help="Decoder preference for dense local cut analysis.",
+    )
+    validate_parser.add_argument(
+        "--local-dense-no-gpu",
+        action="store_true",
+        help="Disable GPU preference for dense local cut analysis.",
+    )
     validate_parser.add_argument("--json", action="store_true", help="Print the generated validation JSON to stdout.")
 
     repair_parser = plan_subparsers.add_parser(
@@ -190,6 +220,30 @@ def _build_parser() -> argparse.ArgumentParser:
     technical_parser.add_argument("--video-sample-interval", type=float, default=AnalysisOptions().video_sample_interval_seconds)
     technical_parser.add_argument("--video-window", type=float, default=AnalysisOptions().video_window_seconds)
     technical_parser.add_argument("--analysis-width", type=int, default=AnalysisOptions().analysis_width)
+    technical_parser.add_argument(
+        "--decoder",
+        choices=["auto", "cuda", "cpu"],
+        default=AnalysisOptions().decoder_preference,
+        help="Preferred decoder path for sequential video analysis.",
+    )
+    technical_parser.add_argument(
+        "--no-gpu",
+        action="store_true",
+        help="Disable GPU preference for the sequential analyzer.",
+    )
+    technical_parser.add_argument("--block-grid-size", type=int, default=AnalysisOptions().block_grid_size)
+    technical_parser.add_argument(
+        "--block-highlight-ratio",
+        type=float,
+        default=AnalysisOptions().block_highlight_ratio,
+    )
+    technical_parser.add_argument("--local-dense-fps", type=float, default=AnalysisOptions().local_dense_fps)
+    technical_parser.add_argument(
+        "--local-dense-context",
+        type=float,
+        default=AnalysisOptions().local_dense_context_seconds,
+    )
+    technical_parser.add_argument("--local-dense-width", type=int, default=AnalysisOptions().local_dense_width)
     technical_parser.add_argument("--json", action="store_true", help="Print the generated analysis_map JSON to stdout.")
 
     roles_parser = analyze_subparsers.add_parser(
@@ -303,6 +357,18 @@ def _build_parser() -> argparse.ArgumentParser:
     scaffold_parser.add_argument("--out-dir", required=True, help="Directory for scaffold artifacts.")
     scaffold_parser.add_argument("--json", action="store_true", help="Print the render manifest JSON to stdout.")
 
+    export_parser = root_subparsers.add_parser("export", help="NLE project export.")
+    export_subparsers = export_parser.add_subparsers(dest="export_command")
+
+    premiere_parser = export_subparsers.add_parser(
+        "premiere",
+        help="Build a Premiere Pro .prproj from a cut_plan.",
+    )
+    premiere_parser.add_argument("--cut-plan", required=True, help="Path to a cut_plan JSON file.")
+    premiere_parser.add_argument("--out", required=True, help="Target .prproj output path.")
+    premiere_parser.add_argument("--name", help="Optional project/sequence name override.")
+    premiere_parser.add_argument("--json", action="store_true", help="Print the export summary JSON to stdout.")
+
     sample_parser = root_subparsers.add_parser("sample", help="Generate small synced media subsets for pipeline tests.")
     sample_subparsers = sample_parser.add_subparsers(dest="sample_command")
 
@@ -375,6 +441,13 @@ def _build_analysis_options(args: argparse.Namespace) -> AnalysisOptions:
         video_sample_interval_seconds=args.video_sample_interval,
         video_window_seconds=args.video_window,
         analysis_width=args.analysis_width,
+        decoder_preference=args.decoder,
+        prefer_gpu=not args.no_gpu,
+        block_grid_size=args.block_grid_size,
+        block_highlight_ratio=args.block_highlight_ratio,
+        local_dense_fps=args.local_dense_fps,
+        local_dense_context_seconds=args.local_dense_context,
+        local_dense_width=args.local_dense_width,
     )
 
 
@@ -402,6 +475,11 @@ def _build_cut_validation_options(args: argparse.Namespace) -> CutValidationOpti
         cut_context_seconds=args.cut_context,
         local_probe_delta_seconds=args.probe_delta,
         local_probe_width=args.probe_width,
+        local_dense_context_seconds=args.local_dense_context,
+        local_dense_fps=args.local_dense_fps,
+        local_dense_width=args.local_dense_width,
+        local_dense_decoder_preference=args.local_dense_decoder,
+        local_dense_prefer_gpu=not args.local_dense_no_gpu,
         repair_min_segment_seconds=getattr(args, "repair_min_segment", CutValidationOptions().repair_min_segment_seconds),
     )
 
@@ -598,6 +676,19 @@ def _print_render_scaffold_summary(manifest: dict[str, Any]) -> None:
     print(f"Command file: {artifacts['command_path']}")
     print(f"Target media: {output['path']}")
     print(f"Output duration: {output['duration_seconds']:.3f} s")
+
+
+def _print_premiere_export_summary(summary: dict[str, Any]) -> None:
+    output = summary["output"]
+    details = summary["summary"]
+    print(f"Premiere project written to: {output['path']}")
+    print(f"Project name: {output['project_name']}")
+    print(
+        f"Assets: {details['video_assets']} video, "
+        f"{details['video_segments']} video segments, "
+        f"{details['audio_segments']} audio segments"
+    )
+    print(f"Output duration: {details['duration_seconds']:.3f} s")
 
 
 def _print_transcript_summary(transcript_artifact: dict[str, Any], output_path: Path) -> None:
@@ -934,6 +1025,24 @@ def main() -> int:
             print(json.dumps(manifest, indent=2))
         else:
             _print_render_scaffold_summary(manifest)
+        return 0
+
+    if args.command == "export" and args.export_command == "premiere":
+        try:
+            cut_plan = load_cut_plan(args.cut_plan)
+            summary = export_premiere_project(
+                cut_plan,
+                output_project_path=args.out,
+                cut_plan_path=args.cut_plan,
+                project_name=args.name,
+            )
+        except Exception as error:  # pragma: no cover - CLI surface
+            parser.exit(1, f"VAZer error: {error}\n")
+
+        if args.json:
+            print(json.dumps(summary, indent=2))
+        else:
+            _print_premiere_export_summary(summary)
         return 0
 
     if args.command == "sample" and args.sample_command == "set":

@@ -215,5 +215,6 @@ python -m vazer analyze roles --sync-map .\artifacts\sync_map.json --out .\artif
 - sichtbarer Review-/Freigabe-Loop fuer spaetere Transcript-, Analyse- und Draft-Schritte
 - Packaging der Desktop-App zu einer echten `.exe`
 - spaeter piecewise Sync fuer Clips, bei denen auch der Rescue-Pfad nicht reicht
-- die neue schnelle Analyse-Pipeline in Code: globaler sequentieller Low-Res-Pass, lokaler Dense-Pass und GPU-Fallback
+- die neue schnelle Analyse-Pipeline ist jetzt im Kern da:
+  globaler sequentieller Low-Res-Pass mit FFmpeg/GPU-Praeferenz, lokaler Dense-Pass fuer Cut-Checks und OpenCV-Fallback
 - dichtere CV-Signale wie Face-Presence, Shot-Boundaries und Framing

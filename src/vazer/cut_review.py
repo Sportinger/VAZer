@@ -6,10 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-import cv2
-import numpy as np
-
 from . import __version__
+from .analysis import AnalysisOptions, analyze_local_dense_window
 from .cut_plan import _merge_video_segments
 from .fftools import probe_media
 from .transcript import transcript_source_metadata
@@ -25,6 +23,11 @@ class CutValidationOptions:
     cut_context_seconds: float = 1.0
     local_probe_delta_seconds: float = 0.12
     local_probe_width: int = 256
+    local_dense_context_seconds: float = 2.0
+    local_dense_fps: float = 8.0
+    local_dense_width: int = 640
+    local_dense_decoder_preference: str = "auto"
+    local_dense_prefer_gpu: bool = True
     analysis_soft_threshold: float = 0.35
     analysis_fail_threshold: float = 0.2
     alternate_margin: float = 0.12
@@ -428,70 +431,48 @@ def _preferred_transcript_boundary(
 
 
 class _FrameProbePool:
-    def __init__(self, width: int, delta_seconds: float) -> None:
+    def __init__(
+        self,
+        width: int,
+        delta_seconds: float,
+        *,
+        dense_context_seconds: float,
+        dense_fps: float,
+        dense_width: int,
+        decoder_preference: str,
+        prefer_gpu: bool,
+    ) -> None:
         self.width = width
         self.delta_seconds = delta_seconds
-        self._captures: dict[str, cv2.VideoCapture] = {}
+        self.dense_context_seconds = dense_context_seconds
+        self.dense_fps = dense_fps
+        self.dense_width = dense_width
+        self.decoder_preference = decoder_preference
+        self.prefer_gpu = prefer_gpu
 
     def close(self) -> None:
-        for capture in self._captures.values():
-            capture.release()
-        self._captures.clear()
-
-    def _capture_for_path(self, path: str) -> cv2.VideoCapture:
-        capture = self._captures.get(path)
-        if capture is None:
-            capture = cv2.VideoCapture(path)
-            self._captures[path] = capture
-        return capture
-
-    def _read_frame(self, path: str, timestamp_seconds: float) -> np.ndarray | None:
-        capture = self._capture_for_path(path)
-        if not capture.isOpened():
-            return None
-
-        capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(timestamp_seconds)) * 1000.0)
-        ok, frame = capture.read()
-        if not ok or frame is None:
-            return None
-        grayscale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        height, width = grayscale.shape
-        if width > self.width:
-            target_width = self.width
-            target_height = max(2, int(round(height * target_width / width / 2.0) * 2))
-            grayscale = cv2.resize(grayscale, (target_width, target_height), interpolation=cv2.INTER_AREA)
-        return grayscale
+        return None
 
     def probe(self, path: str, timestamp_seconds: float) -> dict[str, Any]:
-        center = self._read_frame(path, timestamp_seconds)
-        if center is None:
+        try:
+            return analyze_local_dense_window(
+                path,
+                center_seconds=timestamp_seconds,
+                context_seconds=max(self.dense_context_seconds, self.delta_seconds * 4.0),
+                width=max(self.width, self.dense_width),
+                sample_fps=self.dense_fps,
+                decoder_preference=self.decoder_preference,
+                prefer_gpu=self.prefer_gpu,
+                options=AnalysisOptions(
+                    analysis_width=max(self.width, self.dense_width),
+                ),
+            )
+        except Exception as error:
             return {
                 "success": False,
                 "timestamp_seconds": float(timestamp_seconds),
-                "error": "Could not decode frame at requested timestamp.",
+                "error": str(error),
             }
-
-        previous = self._read_frame(path, max(0.0, timestamp_seconds - self.delta_seconds))
-        following = self._read_frame(path, timestamp_seconds + self.delta_seconds)
-
-        sharpness_raw = float(cv2.Laplacian(center, cv2.CV_64F).var())
-        motion_samples = []
-        if previous is not None and previous.shape == center.shape:
-            motion_samples.append(float(np.mean(cv2.absdiff(center, previous)) / 255.0))
-        if following is not None and following.shape == center.shape:
-            motion_samples.append(float(np.mean(cv2.absdiff(center, following)) / 255.0))
-
-        motion_raw = float(np.mean(motion_samples)) if motion_samples else None
-        mean_luma = float(np.mean(center) / 255.0)
-        return {
-            "success": True,
-            "timestamp_seconds": float(timestamp_seconds),
-            "sharpness_raw": sharpness_raw,
-            "motion_raw": motion_raw,
-            "mean_luma": mean_luma,
-            "soft": sharpness_raw < 12.0,
-            "dark": mean_luma < 0.05,
-        }
 
 
 def _local_probe_timestamp(segment: dict[str, Any], side: str, delta_seconds: float) -> float:
@@ -573,6 +554,7 @@ def build_cut_validation_report(
     transcript_artifact: dict[str, Any] | None = None,
     source_transcript_path: str | None = None,
     options: CutValidationOptions | None = None,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     if cut_plan.get("schema_version") != "vazer.cut_plan.v1":
         raise ValueError("Unsupported cut_plan schema version.")
@@ -597,12 +579,20 @@ def build_cut_validation_report(
     frame_pool = _FrameProbePool(
         width=validation_options.local_probe_width,
         delta_seconds=validation_options.local_probe_delta_seconds,
+        dense_context_seconds=validation_options.local_dense_context_seconds,
+        dense_fps=validation_options.local_dense_fps,
+        dense_width=validation_options.local_dense_width,
+        decoder_preference=validation_options.local_dense_decoder_preference,
+        prefer_gpu=validation_options.local_dense_prefer_gpu,
     )
+    total_cut_pairs = max(1, len(video_segments) - 1)
     try:
         for cut_index, (outgoing_segment, incoming_segment) in enumerate(
             zip(video_segments[:-1], video_segments[1:], strict=False),
             start=1,
         ):
+            if callable(on_progress):
+                on_progress(cut_index - 1, total_cut_pairs, f"Local pass {cut_index}/{total_cut_pairs}")
             if outgoing_segment["asset_id"] == incoming_segment["asset_id"]:
                 continue
 
@@ -721,6 +711,14 @@ def build_cut_validation_report(
                             "message": f"{side.capitalize()} cut frame is unusually dark on the sparse probe.",
                         }
                     )
+                if probe.get("unstable"):
+                    issues.append(
+                        {
+                            "code": f"{side}_motion_spike",
+                            "severity": "warn",
+                            "message": f"{side.capitalize()} cut window contains strong local camera motion.",
+                        }
+                    )
 
             preferred_incoming_asset_id = None
             current_candidate = next(
@@ -805,6 +803,8 @@ def build_cut_validation_report(
                     },
                 }
             )
+            if callable(on_progress):
+                on_progress(cut_index, total_cut_pairs, f"Local pass {cut_index}/{total_cut_pairs}")
     finally:
         frame_pool.close()
 
@@ -840,6 +840,11 @@ def build_cut_validation_report(
             "cut_context_seconds": validation_options.cut_context_seconds,
             "local_probe_delta_seconds": validation_options.local_probe_delta_seconds,
             "local_probe_width": validation_options.local_probe_width,
+            "local_dense_context_seconds": validation_options.local_dense_context_seconds,
+            "local_dense_fps": validation_options.local_dense_fps,
+            "local_dense_width": validation_options.local_dense_width,
+            "local_dense_decoder_preference": validation_options.local_dense_decoder_preference,
+            "local_dense_prefer_gpu": validation_options.local_dense_prefer_gpu,
             "analysis_soft_threshold": validation_options.analysis_soft_threshold,
             "analysis_fail_threshold": validation_options.analysis_fail_threshold,
             "alternate_margin": validation_options.alternate_margin,

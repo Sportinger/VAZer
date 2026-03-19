@@ -138,12 +138,16 @@ This architecture is not trying to solve:
 
 Those can come later. The first job is a fast technical filter that helps edit decisions stay stable.
 
-## Rollout
+## Current Status
 
-The safest rollout order is:
+Implemented in the current codebase:
 
-1. implement the sequential global pass
-2. keep the current sparse path as fallback for comparison
-3. add local dense checks around cuts
-4. only then consider optional GPU acceleration as a fast path
+1. global sequential FFmpeg pass with GPU preference and CPU/OpenCV fallback
+2. low-res grayscale window aggregation with block-aware sharpness and motion scores
+3. local dense cut validation around proposed cuts
 
+Still open later:
+
+1. expose more of the local-pass progress in the desktop UI
+2. add optional flow-lite camera motion refinement
+3. benchmark and tune defaults on longer 4K theater recordings
