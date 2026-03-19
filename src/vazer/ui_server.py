@@ -312,6 +312,36 @@ def _load_reusable_sync_map(
     }
     return reusable_payload
 
+
+def _load_reusable_camera_roles_artifact(path: Path, camera_paths: list[str]) -> dict[str, Any] | None:
+    payload = _load_json_if_exists(path)
+    if payload is None or payload.get("schema_version") != "vazer.camera_roles.v1":
+        return None
+
+    assignments = payload.get("assignments")
+    if not isinstance(assignments, list):
+        return None
+
+    valid_roles = {"totale", "halbtotale", "close"}
+    assignments_by_path: dict[str, dict[str, Any]] = {}
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        assignment_path = str(assignment.get("path") or "")
+        if not assignment_path:
+            continue
+        role = str(assignment.get("role") or "").strip().lower()
+        if role not in valid_roles:
+            continue
+        assignments_by_path[assignment_path] = assignment
+
+    if not all(camera_path in assignments_by_path for camera_path in camera_paths):
+        return None
+
+    filtered_payload = dict(payload)
+    filtered_payload["assignments"] = [assignments_by_path[camera_path] for camera_path in camera_paths]
+    return filtered_payload
+
 INDEX_HTML = """<!doctype html>
 <html lang="de">
 <head>
@@ -1626,81 +1656,84 @@ class UIState:
             if camera_path_list:
                 self._wait_if_paused(job_id)
                 self._raise_if_canceled(job_id)
-                self._update_job(
-                    job_id,
-                    stage="roles",
-                    stage_label="Camera roles",
-                    message="Classifying middle frames into totale / halbtotale / close.",
-                    progress_percent=40.0,
-                )
-                for index, camera_path in enumerate(camera_path_list, start=1):
-                    asset_id = asset_id_by_path[camera_path]
-                    self._update_project_file(
-                        project_id,
-                        camera_path,
-                        ui_status="role_check",
-                        ui_note=f"Preparing AI role check {index}/{len(camera_path_list)}",
-                        extra_fields={"asset_id": asset_id},
-                    )
-
                 camera_role_path = artifact_paths["camera_roles_path"]
-                role_frame_dir = artifact_paths["camera_roles_dir"]
-                try:
-                    camera_role_artifact = build_camera_role_artifact(
-                        [
+                reusable_camera_roles = _load_reusable_camera_roles_artifact(camera_role_path, camera_path_list)
+                camera_role_artifact = reusable_camera_roles
+                if camera_role_artifact is None:
+                    self._update_job(
+                        job_id,
+                        stage="roles",
+                        stage_label="Camera roles",
+                        message="Classifying middle frames into totale / halbtotale / close.",
+                        progress_percent=40.0,
+                    )
+                    for index, camera_path in enumerate(camera_path_list, start=1):
+                        asset_id = asset_id_by_path[camera_path]
+                        self._update_project_file(
+                            project_id,
+                            camera_path,
+                            ui_status="role_check",
+                            ui_note=f"Preparing AI role check {index}/{len(camera_path_list)}",
+                            extra_fields={"asset_id": asset_id},
+                        )
+
+                    role_frame_dir = artifact_paths["camera_roles_dir"]
+                    try:
+                        camera_role_artifact = build_camera_role_artifact(
+                            [
+                                {
+                                    "asset_id": asset_id_by_path[camera_path],
+                                    "path": camera_path,
+                                    "display_name": Path(camera_path).name,
+                                }
+                                for camera_path in camera_path_list
+                            ],
+                            output_dir=str(role_frame_dir),
+                        )
+                    except Exception as error:
+                        role_assignments = [
                             {
                                 "asset_id": asset_id_by_path[camera_path],
                                 "path": camera_path,
                                 "display_name": Path(camera_path).name,
+                                "duration_seconds": (probe_media(camera_path).duration_seconds or 0.0),
+                                "middle_seconds": (probe_media(camera_path).duration_seconds or 0.0) / 2.0,
+                                "frame_path": None,
+                                "image_width": None,
+                                "image_height": None,
+                                "role": infer_camera_role_from_name(asset_id_by_path[camera_path], camera_path),
+                                "confidence": "low",
+                                "reason": "Fallback from filename hints after AI role classification failed.",
                             }
                             for camera_path in camera_path_list
-                        ],
-                        output_dir=str(role_frame_dir),
-                    )
-                except Exception as error:
-                    role_assignments = [
-                        {
-                            "asset_id": asset_id_by_path[camera_path],
-                            "path": camera_path,
-                            "display_name": Path(camera_path).name,
-                            "duration_seconds": (probe_media(camera_path).duration_seconds or 0.0),
-                            "middle_seconds": (probe_media(camera_path).duration_seconds or 0.0) / 2.0,
-                            "frame_path": None,
-                            "image_width": None,
-                            "image_height": None,
-                            "role": infer_camera_role_from_name(asset_id_by_path[camera_path], camera_path),
-                            "confidence": "low",
-                            "reason": "Fallback from filename hints after AI role classification failed.",
-                        }
-                        for camera_path in camera_path_list
-                    ]
-                    camera_role_artifact = {
-                        "schema_version": "vazer.camera_roles.v1",
-                        "generated_at_utc": _utc_timestamp(),
-                        "tool": {
-                            "name": "vazer",
-                            "version": __version__,
-                        },
-                        "provider": {
-                            "name": "fallback",
-                            "model": None,
-                        },
-                        "summary": {
-                            "asset_count": len(role_assignments),
-                            "role_counts": {
-                                role: sum(1 for assignment in role_assignments if assignment["role"] == role)
-                                for role in ("close", "halbtotale", "totale")
+                        ]
+                        camera_role_artifact = {
+                            "schema_version": "vazer.camera_roles.v1",
+                            "generated_at_utc": _utc_timestamp(),
+                            "tool": {
+                                "name": "vazer",
+                                "version": __version__,
                             },
-                            "summary_text": "Filename fallback was used because AI role classification failed.",
-                        },
-                        "assignments": role_assignments,
-                        "warning": str(error),
-                    }
-                    classification.setdefault("warnings", []).append(
-                        f"AI camera role classification failed. Fell back to filename hints: {error}"
-                    )
+                            "provider": {
+                                "name": "fallback",
+                                "model": None,
+                            },
+                            "summary": {
+                                "asset_count": len(role_assignments),
+                                "role_counts": {
+                                    role: sum(1 for assignment in role_assignments if assignment["role"] == role)
+                                    for role in ("close", "halbtotale", "totale")
+                                },
+                                "summary_text": "Filename fallback was used because AI role classification failed.",
+                            },
+                            "assignments": role_assignments,
+                            "warning": str(error),
+                        }
+                        classification.setdefault("warnings", []).append(
+                            f"AI camera role classification failed. Fell back to filename hints: {error}"
+                        )
 
-                write_camera_role_artifact(camera_role_artifact, str(camera_role_path))
+                    write_camera_role_artifact(camera_role_artifact, str(camera_role_path))
                 classification["camera_roles"] = {
                     assignment["asset_id"]: assignment["role"]
                     for assignment in camera_role_artifact["assignments"]
@@ -1734,18 +1767,32 @@ class UIState:
                     job_id,
                     stage="roles",
                     stage_label="Camera roles",
-                    message="Camera roles assigned.",
+                    message=(
+                        "Using existing camera roles."
+                        if reusable_camera_roles is not None
+                        else "Camera roles assigned."
+                    ),
                     progress_percent=45.0,
                 )
-                self._wait_for_role_review(job_id)
-                self._update_job(
-                    job_id,
-                    status="running",
-                    stage="roles",
-                    stage_label="Camera roles",
-                    message="Role review confirmed. Continuing with audio sync.",
-                    progress_percent=46.0,
-                )
+                if reusable_camera_roles is None:
+                    self._wait_for_role_review(job_id)
+                    self._update_job(
+                        job_id,
+                        status="running",
+                        stage="roles",
+                        stage_label="Camera roles",
+                        message="Role review confirmed. Continuing with audio sync.",
+                        progress_percent=46.0,
+                    )
+                else:
+                    self._update_job(
+                        job_id,
+                        status="running",
+                        stage="roles",
+                        stage_label="Camera roles",
+                        message="Existing camera roles confirmed. Continuing with audio sync.",
+                        progress_percent=46.0,
+                    )
 
             master_path = classification.get("master_path")
             if not master_path or not camera_path_list:
