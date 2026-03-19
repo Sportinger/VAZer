@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -14,7 +15,13 @@ import uuid
 import webbrowser
 
 from . import __version__
-from .analysis import AnalysisOptions, build_analysis_map, write_analysis_map
+from .analysis import (
+    AnalysisOptions,
+    analyze_camera_video_signals,
+    analyze_master_audio_activity,
+    compose_analysis_map,
+    write_analysis_map,
+)
 from .camera_roles import build_camera_role_artifact, infer_camera_role_from_name, write_camera_role_artifact
 from .cut_plan import write_cut_plan
 from .cut_review import CutValidationOptions, build_cut_validation_report, repair_cut_plan, write_cut_validation_report
@@ -1141,9 +1148,172 @@ class UIState:
                 return
 
             sync_options = SyncOptions()
+            analysis_options = AnalysisOptions()
+            transcription_options = TranscriptionOptions(model="whisper-1")
             entries: list[dict[str, Any]] = []
             master_summary: dict[str, Any] | None = None
             partial_path = artifacts_root / "sync_map.partial.json"
+            analysis_futures: dict[str, Future[dict[str, Any]]] = {}
+            transcript_future: Future[dict[str, Any]] | None = None
+            media_progress_lock = threading.Lock()
+            analysis_progress_by_asset = {asset_id_by_path[path]: 0.0 for path in camera_path_list}
+            media_progress: dict[str, dict[str, Any]] = {
+                "sync": {
+                    "label": "Sync",
+                    "progress_percent": 0.0,
+                    "status": "running",
+                    "detail": "Preparing camera sync.",
+                },
+                "transcript": {
+                    "label": "Text",
+                    "progress_percent": 0.0,
+                    "status": "running",
+                    "detail": "Preparing Whisper transcript.",
+                },
+                "analysis": {
+                    "label": "Bild",
+                    "progress_percent": 0.0,
+                    "status": "pending",
+                    "detail": "Waiting for synced cameras.",
+                },
+            }
+
+            def _publish_media_progress() -> None:
+                with media_progress_lock:
+                    snapshot = json.loads(json.dumps(media_progress))
+                    sync_progress = float(snapshot["sync"]["progress_percent"])
+                    transcript_progress = float(snapshot["transcript"]["progress_percent"])
+                    analysis_progress = float(snapshot["analysis"]["progress_percent"])
+                overall_progress = 46.0 + 28.0 * (
+                    0.4 * (sync_progress / 100.0)
+                    + 0.3 * (transcript_progress / 100.0)
+                    + 0.3 * (analysis_progress / 100.0)
+                )
+                parts = []
+                for task_id in ("sync", "transcript", "analysis"):
+                    task = snapshot[task_id]
+                    if task.get("status") == "pending":
+                        continue
+                    parts.append(f"{task['label']} {task['progress_percent']:.0f}%")
+                self._update_job(
+                    job_id,
+                    stage="media_parallel",
+                    stage_label="Sync + Text + Bild",
+                    message=" | ".join(parts) or "Preparing media tasks.",
+                    progress_percent=overall_progress,
+                    parallel_progress=snapshot,
+                )
+
+            def _set_media_progress(task_id: str, progress_percent: float, detail: str, status: str) -> None:
+                with media_progress_lock:
+                    media_progress[task_id]["progress_percent"] = max(0.0, min(100.0, float(progress_percent)))
+                    media_progress[task_id]["detail"] = detail
+                    media_progress[task_id]["status"] = status
+                _publish_media_progress()
+
+            def _transcript_progress(completed_chunks: int, total_chunks: int, detail: str) -> None:
+                progress_percent = 100.0 * completed_chunks / max(1, total_chunks)
+                self._update_project_file(
+                    project_id,
+                    master_path,
+                    ui_status="transcribing",
+                    ui_note=detail,
+                    extra_fields={
+                        "ui_progress_percent": progress_percent,
+                        "ui_progress_label": "Whisper",
+                        "ui_progress_color": "#70abff",
+                    },
+                )
+                _set_media_progress("transcript", progress_percent, detail, "running")
+
+            def _analysis_progress(asset_id: str, camera_path: str, role: str | None, progress_percent: float, detail: str) -> None:
+                analysis_progress_by_asset[asset_id] = progress_percent
+                aggregate = sum(analysis_progress_by_asset.values()) / max(1, len(analysis_progress_by_asset))
+                self._update_project_file(
+                    project_id,
+                    camera_path,
+                    ui_status="analyzing",
+                    ui_note=_format_camera_note(role, detail),
+                    extra_fields={
+                        "ui_progress_percent": progress_percent,
+                        "ui_progress_label": "CV",
+                        "ui_progress_color": "#63c178",
+                    },
+                )
+                _set_media_progress("analysis", aggregate, "Analyzing synced cameras.", "running")
+
+            def _run_camera_analysis(sync_entry: dict[str, Any], camera_path: str, role: str | None) -> dict[str, Any]:
+                asset_id = sync_entry["asset_id"]
+                try:
+                    result = analyze_camera_video_signals(
+                        sync_entry,
+                        analysis_options,
+                        on_progress=lambda progress_percent, detail: _analysis_progress(
+                            asset_id,
+                            camera_path,
+                            role,
+                            progress_percent,
+                            detail,
+                        ),
+                    )
+                except Exception as error:
+                    analysis_progress_by_asset[asset_id] = 100.0
+                    aggregate = sum(analysis_progress_by_asset.values()) / max(1, len(analysis_progress_by_asset))
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status="failed",
+                        ui_note=_format_camera_note(role, f"Analysis failed: {error}"),
+                        extra_fields={
+                            "ui_progress_percent": 100.0,
+                            "ui_progress_label": "CV",
+                            "ui_progress_color": "#e26060",
+                        },
+                    )
+                    _set_media_progress("analysis", aggregate, "Analyzing synced cameras.", "running")
+                    return {
+                        "asset_id": asset_id,
+                        "path": camera_path,
+                        "status": "failed",
+                        "error": str(error),
+                    }
+
+                analysis_progress_by_asset[asset_id] = 100.0
+                aggregate = sum(analysis_progress_by_asset.values()) / max(1, len(analysis_progress_by_asset))
+                self._update_project_file(
+                    project_id,
+                    camera_path,
+                    ui_status="analyzed",
+                    ui_note=_format_camera_note(role, "CV analysis ready."),
+                    extra_fields={
+                        "ui_progress_percent": 100.0,
+                        "ui_progress_label": "CV",
+                        "ui_progress_color": "#63c178",
+                    },
+                )
+                _set_media_progress("analysis", aggregate, "Analyzing synced cameras.", "running")
+                return result
+
+            media_executor = ThreadPoolExecutor(max_workers=max(2, min(len(camera_path_list) + 1, 4)))
+            self._update_project_file(
+                project_id,
+                master_path,
+                ui_status="transcribing",
+                ui_note="Preparing Whisper transcript.",
+                extra_fields={
+                    "ui_progress_percent": 0.0,
+                    "ui_progress_label": "Whisper",
+                    "ui_progress_color": "#70abff",
+                },
+            )
+            transcript_future = media_executor.submit(
+                build_master_transcript,
+                master_path,
+                source_sync_map_path=None,
+                options=transcription_options,
+                on_progress=_transcript_progress,
+            )
+            _publish_media_progress()
 
             for index, camera_path in enumerate(camera_path_list, start=1):
                 self._wait_if_paused(job_id)
@@ -1155,14 +1325,18 @@ class UIState:
                     camera_path,
                     ui_status="syncing",
                     ui_note=_format_camera_note(role, f"Syncing camera {index}/{len(camera_path_list)}"),
-                    extra_fields={"asset_id": asset_id},
+                    extra_fields={
+                        "asset_id": asset_id,
+                        "ui_progress_percent": 10.0,
+                        "ui_progress_label": "Sync",
+                        "ui_progress_color": "#ef9d4d",
+                    },
                 )
-                self._update_job(
-                    job_id,
-                    stage="syncing",
-                    stage_label="Audio sync",
-                    message=f"Syncing {Path(camera_path).name} ({index}/{len(camera_path_list)})",
-                    progress_percent=45.0 + 45.0 * ((index - 1) / len(camera_path_list)),
+                _set_media_progress(
+                    "sync",
+                    100.0 * (index - 1) / max(1, len(camera_path_list)),
+                    f"Syncing {Path(camera_path).name} ({index}/{len(camera_path_list)})",
+                    "running",
                 )
                 try:
                     report = analyze_sync(master_path, camera_path, options=sync_options)
@@ -1175,11 +1349,17 @@ class UIState:
                             "error": str(error),
                         }
                     )
+                    analysis_progress_by_asset[asset_id] = 100.0
                     self._update_project_file(
                         project_id,
                         camera_path,
                         ui_status="failed",
                         ui_note=_format_camera_note(role, f"Sync failed: {error}"),
+                        extra_fields={
+                            "ui_progress_percent": 100.0,
+                            "ui_progress_label": "Sync",
+                            "ui_progress_color": "#e26060",
+                        },
                     )
                 else:
                     if master_summary is None:
@@ -1199,8 +1379,22 @@ class UIState:
                                 else str(sync_entry.get("error") or "Sync failed.")
                             ),
                         ),
-                        extra_fields={"camera_role": role},
+                        extra_fields={
+                            "camera_role": role,
+                            "ui_progress_percent": 100.0,
+                            "ui_progress_label": "Sync",
+                            "ui_progress_color": "#63c178" if entry_status == "synced" else "#e26060",
+                        },
                     )
+                    if entry_status == "synced":
+                        analysis_futures[asset_id] = media_executor.submit(
+                            _run_camera_analysis,
+                            sync_entry,
+                            camera_path,
+                            role,
+                        )
+                    else:
+                        analysis_progress_by_asset[asset_id] = 100.0
 
                 partial_sync_map = {
                     "schema_version": "vazer.sync_map.v1",
@@ -1244,6 +1438,12 @@ class UIState:
                     },
                 )
                 self._write_project_manifest(project_id)
+                _set_media_progress(
+                    "sync",
+                    100.0 * index / max(1, len(camera_path_list)),
+                    f"Synced {index}/{len(camera_path_list)} camera files.",
+                    "done" if index == len(camera_path_list) else "running",
+                )
 
             final_sync_map = json.loads(partial_path.read_text(encoding="utf-8-sig"))
             sync_map_path = artifacts_root / "sync_map.json"
@@ -1260,22 +1460,26 @@ class UIState:
             project_root = Path(self._projects[project_id]["root_path"])
             role_overrides = dict(classification.get("camera_roles") or {})
 
-            self._wait_if_paused(job_id)
-            self._raise_if_canceled(job_id)
-            self._update_job(
-                job_id,
-                stage="transcribing",
-                stage_label="Transcript",
-                message="Transcribing master audio with Whisper.",
-                progress_percent=58.0,
-            )
-            transcript_artifact = build_master_transcript(
-                master_path,
-                source_sync_map_path=str(sync_map_path),
-                options=TranscriptionOptions(model="whisper-1"),
-            )
+            transcript_artifact = transcript_future.result() if transcript_future is not None else None
+            if transcript_artifact is None:
+                raise ValueError("Transcript task did not return a result.")
+            transcript_artifact["source_sync_map"] = {
+                "schema_version": "vazer.sync_map.v1",
+                "path": str(sync_map_path),
+            }
             transcript_path = artifacts_root / "transcript.json"
             write_transcript_artifact(transcript_artifact, str(transcript_path))
+            self._update_project_file(
+                project_id,
+                master_path,
+                ui_status="master",
+                ui_note="Transcript ready.",
+                extra_fields={
+                    "ui_progress_percent": 100.0,
+                    "ui_progress_label": "Whisper",
+                    "ui_progress_color": "#63c178",
+                },
+            )
             self._update_project(
                 project_id,
                 artifacts={
@@ -1284,20 +1488,25 @@ class UIState:
                 },
             )
             self._write_project_manifest(project_id)
+            _set_media_progress("transcript", 100.0, "Transcript complete.", "done")
 
-            self._wait_if_paused(job_id)
-            self._raise_if_canceled(job_id)
-            self._update_job(
-                job_id,
-                stage="analysis",
-                stage_label="Analyse",
-                message="Running cheap technical analysis on synced cameras.",
-                progress_percent=66.0,
-            )
-            analysis_map = build_analysis_map(
+            master_signals = analyze_master_audio_activity(master_path, analysis_options)
+            analyzed_entries: list[dict[str, Any]] = []
+            for entry in final_sync_map.get("entries", []):
+                if not isinstance(entry, dict) or entry.get("status") != "synced":
+                    continue
+                asset_id = str(entry.get("asset_id"))
+                future = analysis_futures.get(asset_id)
+                if future is None:
+                    continue
+                analyzed_entries.append(future.result())
+
+            analysis_map = compose_analysis_map(
                 final_sync_map,
                 source_sync_map_path=str(sync_map_path),
-                options=AnalysisOptions(),
+                options=analysis_options,
+                master_signals=master_signals,
+                analyzed_entries=analyzed_entries,
             )
             analysis_map_path = artifacts_root / "analysis_map.json"
             write_analysis_map(analysis_map, str(analysis_map_path))
@@ -1309,6 +1518,8 @@ class UIState:
                 },
             )
             self._write_project_manifest(project_id)
+            _set_media_progress("analysis", 100.0, "Analysis complete.", "done")
+            media_executor.shutdown(wait=True)
 
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)

@@ -78,6 +78,58 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         "render": (86.0, 100.0),
     }
 
+    class FileRowWidget(QWidget):
+        def __init__(self, file_info: dict[str, Any]) -> None:
+            super().__init__()
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(6, 6, 6, 6)
+            layout.setSpacing(5)
+
+            name_label = QLabel(str(file_info.get("display_name") or Path(file_info["stored_path"]).name))
+            name_label.setObjectName("fileRowName")
+            name_label.setWordWrap(False)
+            layout.addWidget(name_label)
+
+            note_parts = [str(file_info.get("ui_status") or "queued")]
+            note = str(file_info.get("ui_note") or "").strip()
+            if note:
+                note_parts.append(note)
+            detail_label = QLabel(" | ".join(part for part in note_parts if part))
+            detail_label.setObjectName("fileRowDetail")
+            detail_label.setWordWrap(True)
+            layout.addWidget(detail_label)
+
+            progress_percent = file_info.get("ui_progress_percent")
+            progress_label = str(file_info.get("ui_progress_label") or "").strip()
+            if progress_percent is not None:
+                progress_bar = QProgressBar()
+                progress_bar.setRange(0, 100)
+                progress_bar.setValue(int(round(float(progress_percent))))
+                progress_bar.setTextVisible(True)
+                progress_bar.setFormat(
+                    f"{progress_label} %p%" if progress_label else "%p%"
+                )
+                progress_bar.setObjectName("fileRowProgress")
+                progress_color = str(file_info.get("ui_progress_color") or "#ef9d4d")
+                progress_bar.setStyleSheet(
+                    f"""
+                    QProgressBar {{
+                      min-height: 10px;
+                      max-height: 10px;
+                      border: 1px solid rgba(255,255,255,0.08);
+                      border-radius: 999px;
+                      background: rgba(255,255,255,0.06);
+                      color: transparent;
+                    }}
+                    QProgressBar::chunk {{
+                      border-radius: 999px;
+                      background: {progress_color};
+                    }}
+                    """
+                )
+                layout.addWidget(progress_bar)
+
     class PhaseBadge(QWidget):
         def __init__(self, symbol: str) -> None:
             super().__init__()
@@ -472,6 +524,14 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                   background: #202734;
                   border-radius: 10px;
                 }
+                QLabel#fileRowName {
+                  font-weight: 700;
+                  color: #f5efe4;
+                }
+                QLabel#fileRowDetail {
+                  color: #b9b2a3;
+                  line-height: 1.35;
+                }
                 QLabel#preview {
                   padding: 12px;
                 }
@@ -719,10 +779,13 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.file_list.clear()
             selected_row = -1
             for index, file_info in enumerate(source_files):
-                item = QListWidgetItem(self._file_item_text(file_info))
+                item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, file_info["stored_path"])
                 item.setToolTip(str(file_info.get("ui_note") or ""))
                 self.file_list.addItem(item)
+                row_widget = FileRowWidget(file_info)
+                item.setSizeHint(row_widget.sizeHint())
+                self.file_list.setItemWidget(item, row_widget)
                 if current_path and file_info["stored_path"] == current_path:
                     selected_row = index
             self.file_list.blockSignals(False)
@@ -972,6 +1035,21 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             if status == "completed":
                 return {phase["id"]: "done" for phase in PIPELINE_PHASES}
 
+            if stage == "media_parallel":
+                parallel_progress = active_job.get("parallel_progress") or {}
+                for phase_id in ("probe", "classify", "roles"):
+                    states[phase_id] = "done"
+                sync_state = (parallel_progress.get("sync") or {}).get("status")
+                transcript_state = (parallel_progress.get("transcript") or {}).get("status")
+                analysis_state = (parallel_progress.get("analysis") or {}).get("status")
+                states["sync"] = "done" if sync_state == "done" else "active"
+                states["transcript"] = "done" if transcript_state == "done" else "active"
+                if analysis_state == "pending":
+                    states["analysis"] = "pending"
+                else:
+                    states["analysis"] = "done" if analysis_state == "done" else "active"
+                return states
+
             phase_id = STAGE_TO_PHASE_ID.get(stage)
             if phase_id is None and status in {"failed", "canceled"}:
                 phase_id = self._phase_from_progress(active_job)
@@ -999,6 +1077,16 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             status = str(active_job.get("status") or "")
             if status == "completed":
                 return {phase["id"]: 100.0 for phase in PIPELINE_PHASES}
+
+            if str(active_job.get("stage") or "") == "media_parallel":
+                parallel_progress = active_job.get("parallel_progress") or {}
+                fills["probe"] = 100.0
+                fills["classify"] = 100.0
+                fills["roles"] = 100.0
+                fills["sync"] = float((parallel_progress.get("sync") or {}).get("progress_percent") or 0.0)
+                fills["transcript"] = float((parallel_progress.get("transcript") or {}).get("progress_percent") or 0.0)
+                fills["analysis"] = float((parallel_progress.get("analysis") or {}).get("progress_percent") or 0.0)
+                return fills
 
             progress_percent = max(0.0, min(100.0, float(active_job.get("progress_percent") or 0.0)))
             for phase_id, (start_percent, end_percent) in PHASE_PROGRESS_RANGES.items():

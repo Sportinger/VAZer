@@ -21,6 +21,8 @@ Update vom 2026-03-19:
 - Kurzclip-Sync fuer 1-4-Minuten-Testfenster ist jetzt robuster
 - Anchor-Fenster und Spacing werden bei kurzen Overlaps adaptiv verkleinert
 - starke Kurzclips duerfen notfalls mit genau einem sehr starken Anchor validieren statt pauschal zu scheitern
+- Desktop zeigt jetzt pro Datei farbige Fortschrittsbalken
+- Transcript und CV koennen im Desktop-Lauf parallel zum Media-Block anlaufen
 
 Warum Python fuer diesen Start:
 

@@ -142,6 +142,7 @@ def build_master_transcript(
     *,
     source_sync_map_path: str | None = None,
     options: TranscriptionOptions | None = None,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     transcription_options = options or TranscriptionOptions()
     client = _build_client()
@@ -166,6 +167,9 @@ def build_master_transcript(
     full_text_parts: list[str] = []
     previous_text_tail: str | None = None
     detected_language: str | None = None
+
+    if callable(on_progress):
+        on_progress(0, chunk_count, "Preparing transcript chunks.")
 
     with tempfile.TemporaryDirectory(prefix="vazer-transcribe-") as temp_dir:
         temp_root = Path(temp_dir)
@@ -265,6 +269,13 @@ def build_master_transcript(
             if chunk_text:
                 full_text_parts.append(chunk_text)
                 previous_text_tail = chunk_text[-PROMPT_TAIL_CHARS:]
+
+            if callable(on_progress):
+                on_progress(
+                    index + 1,
+                    chunk_count,
+                    f"Transcript chunk {index + 1}/{chunk_count}",
+                )
 
     full_text = "\n\n".join(part for part in full_text_parts if part).strip()
     return {

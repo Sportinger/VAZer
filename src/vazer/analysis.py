@@ -155,7 +155,13 @@ def analyze_master_audio_activity(master_path: str, options: AnalysisOptions) ->
     }
 
 
-def _iter_sampled_frames(path: str, width: int, sample_interval_seconds: float) -> tuple[list[tuple[float, np.ndarray]], dict[str, Any]]:
+def _iter_sampled_frames(
+    path: str,
+    width: int,
+    sample_interval_seconds: float,
+    *,
+    on_progress: Any | None = None,
+) -> tuple[list[tuple[float, np.ndarray]], dict[str, Any]]:
     media_info = probe_media(path)
     if not media_info.video_streams:
         raise ValueError(f"No video stream found in {path}.")
@@ -179,19 +185,26 @@ def _iter_sampled_frames(path: str, width: int, sample_interval_seconds: float) 
 
     frames: list[tuple[float, np.ndarray]] = []
     skipped_samples = 0
+    if callable(on_progress):
+        on_progress(0.0, "Sampling video frames.")
     try:
-        for timestamp in sample_timestamps:
+        total_samples = max(1, len(sample_timestamps))
+        for sample_index, timestamp in enumerate(sample_timestamps, start=1):
             seek_milliseconds = max(0.0, float(timestamp) * 1000.0)
             capture.set(cv2.CAP_PROP_POS_MSEC, seek_milliseconds)
             ok, frame = capture.read()
             if not ok or frame is None:
                 skipped_samples += 1
+                if callable(on_progress):
+                    on_progress((sample_index / total_samples) * 100.0, f"Sampling frame {sample_index}/{total_samples}")
                 continue
 
             grayscale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             if grayscale.shape[1] != target_width or grayscale.shape[0] != target_height:
                 grayscale = cv2.resize(grayscale, (target_width, target_height), interpolation=cv2.INTER_AREA)
             frames.append((float(timestamp), grayscale))
+            if callable(on_progress):
+                on_progress((sample_index / total_samples) * 100.0, f"Sampling frame {sample_index}/{total_samples}")
     finally:
         capture.release()
 
@@ -290,9 +303,19 @@ def _aggregate_video_windows(
     return normalized_windows
 
 
-def analyze_camera_video_signals(entry: dict[str, Any], options: AnalysisOptions) -> dict[str, Any]:
+def analyze_camera_video_signals(
+    entry: dict[str, Any],
+    options: AnalysisOptions,
+    *,
+    on_progress: Any | None = None,
+) -> dict[str, Any]:
     path = entry["path"]
-    frames, sampling_summary = _iter_sampled_frames(path, options.analysis_width, options.video_sample_interval_seconds)
+    frames, sampling_summary = _iter_sampled_frames(
+        path,
+        options.analysis_width,
+        options.video_sample_interval_seconds,
+        on_progress=on_progress,
+    )
     previous_frame: np.ndarray | None = None
     sample_records: list[dict[str, float]] = []
     for source_time_seconds, frame in frames:
@@ -332,6 +355,46 @@ def analyze_camera_video_signals(entry: dict[str, Any], options: AnalysisOptions
             "mean_sharpness_score": mean_sharpness,
             "mean_stability_score": mean_stability,
             "usable_window_ratio": usable_ratio,
+        },
+    }
+
+
+def compose_analysis_map(
+    sync_map: dict[str, Any],
+    *,
+    source_sync_map_path: str | None,
+    options: AnalysisOptions,
+    master_signals: dict[str, Any],
+    analyzed_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "vazer.analysis_map.v1",
+        "generated_at_utc": _utc_timestamp(),
+        "tool": {
+            "name": "vazer",
+            "version": __version__,
+        },
+        "source_sync_map": {
+            "schema_version": sync_map["schema_version"],
+            "path": source_sync_map_path,
+        },
+        "master": sync_map["master"],
+        "options": {
+            "audio_rate": options.audio_rate,
+            "audio_frame_seconds": options.audio_frame_seconds,
+            "speech_merge_gap_seconds": options.speech_merge_gap_seconds,
+            "speech_min_segment_seconds": options.speech_min_segment_seconds,
+            "video_sample_interval_seconds": options.video_sample_interval_seconds,
+            "video_window_seconds": options.video_window_seconds,
+            "analysis_width": options.analysis_width,
+            "video_sampler": "opencv_sparse_seek",
+        },
+        "master_audio_activity": master_signals,
+        "entries": analyzed_entries,
+        "summary": {
+            "total": len(analyzed_entries),
+            "analyzed": sum(1 for entry in analyzed_entries if entry["status"] == "analyzed"),
+            "failed": sum(1 for entry in analyzed_entries if entry["status"] == "failed"),
         },
     }
 
@@ -383,36 +446,13 @@ def build_analysis_map(
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 analyzed_entries = list(executor.map(_analyze_entry, synced_entries))
 
-    return {
-        "schema_version": "vazer.analysis_map.v1",
-        "generated_at_utc": _utc_timestamp(),
-        "tool": {
-            "name": "vazer",
-            "version": __version__,
-        },
-        "source_sync_map": {
-            "schema_version": sync_map["schema_version"],
-            "path": source_sync_map_path,
-        },
-        "master": sync_map["master"],
-        "options": {
-            "audio_rate": analysis_options.audio_rate,
-            "audio_frame_seconds": analysis_options.audio_frame_seconds,
-            "speech_merge_gap_seconds": analysis_options.speech_merge_gap_seconds,
-            "speech_min_segment_seconds": analysis_options.speech_min_segment_seconds,
-            "video_sample_interval_seconds": analysis_options.video_sample_interval_seconds,
-            "video_window_seconds": analysis_options.video_window_seconds,
-            "analysis_width": analysis_options.analysis_width,
-            "video_sampler": "opencv_sparse_seek",
-        },
-        "master_audio_activity": master_signals,
-        "entries": analyzed_entries,
-        "summary": {
-            "total": len(analyzed_entries),
-            "analyzed": sum(1 for entry in analyzed_entries if entry["status"] == "analyzed"),
-            "failed": sum(1 for entry in analyzed_entries if entry["status"] == "failed"),
-        },
-    }
+    return compose_analysis_map(
+        sync_map,
+        source_sync_map_path=source_sync_map_path,
+        options=analysis_options,
+        master_signals=master_signals,
+        analyzed_entries=analyzed_entries,
+    )
 
 
 def load_analysis_map(path: str) -> dict[str, Any]:
