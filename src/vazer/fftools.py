@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from .process_manager import run_managed
+
 
 @dataclass(slots=True)
 class AudioStreamInfo:
@@ -42,7 +44,7 @@ class MediaInfo:
 
 
 def _run_command(args: list[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(args, check=True, capture_output=True)
+    return run_managed(args, check=True, capture_output=True)
 
 
 def _optional_int(value: Any) -> int | None:

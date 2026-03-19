@@ -169,6 +169,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.media_cache: dict[str, Any] = {}
             self.current_preview_pixmap: QPixmap | None = None
             self.current_preview_key: str | None = None
+            self._shutdown_started = False
 
             self.setWindowTitle("VAZer")
             self.resize(1280, 820)
@@ -543,6 +544,30 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         def resizeEvent(self, event) -> None:  # type: ignore[override]
             super().resizeEvent(event)
             self._refresh_preview_pixmap()
+
+        def closeEvent(self, event) -> None:  # noqa: N802
+            active_job = self._find_active_job()
+            is_busy = active_job is not None and active_job.get("status") in {
+                "queued",
+                "running",
+                "pause_requested",
+                "paused",
+                "review_required",
+            }
+            if is_busy:
+                response = QMessageBox.question(
+                    self,
+                    "VAZer schliessen",
+                    "Ein VAZ-Lauf ist noch aktiv. Wirklich schliessen und laufende Prozesse abbrechen?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if response != QMessageBox.StandardButton.Yes:
+                    event.ignore()
+                    return
+
+            self._shutdown_app_state()
+            event.accept()
 
         def import_paths(self, paths: list[str]) -> None:
             if self._active_job_is_busy():
@@ -1089,8 +1114,18 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return parent.name or "VAZ Projekt"
             return f"VAZ Import ({len(resolved)} Dateien)"
 
+        def _shutdown_app_state(self) -> None:
+            if self._shutdown_started:
+                return
+            self._shutdown_started = True
+            try:
+                self.app_state.shutdown()
+            except Exception:
+                pass
+
     app = QApplication.instance() or QApplication([])
     window = MainWindow(UIState(Path(workspace)))
+    app.aboutToQuit.connect(window._shutdown_app_state)
     window.show()
     window.raise_()
     window.activateWindow()

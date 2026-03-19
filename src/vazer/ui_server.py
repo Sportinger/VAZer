@@ -19,6 +19,7 @@ from .camera_roles import build_camera_role_artifact, infer_camera_role_from_nam
 from .cut_plan import write_cut_plan
 from .cut_review import CutValidationOptions, build_cut_validation_report, repair_cut_plan, write_cut_validation_report
 from .fftools import MediaInfo, probe_media
+from .process_manager import terminate_registered_processes
 from .render import apply_max_render_size, build_render_scaffold, run_render
 from .sync import SyncOptions, analyze_sync
 from .sync_map import write_sync_map
@@ -568,6 +569,22 @@ class UIState:
         with condition:
             condition.notify_all()
         return {"job_id": job_id, "status": "canceled"}
+
+    def shutdown(self) -> None:
+        with self._lock:
+            active_job_ids = [
+                job_id
+                for job_id, job in self._jobs.items()
+                if job.get("status") in {"queued", "running", "pause_requested", "paused", "review_required"}
+            ]
+
+        for job_id in active_job_ids:
+            try:
+                self.cancel_job(job_id)
+            except Exception:
+                pass
+
+        terminate_registered_processes()
 
     def _update_project(self, project_id: str, **changes: Any) -> None:
         with self._lock:

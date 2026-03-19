@@ -12,6 +12,7 @@ from typing import Any
 
 from . import __version__
 from .fftools import probe_media
+from .process_manager import run_managed
 
 
 DEFAULT_TRANSCRIBE_MODEL = "whisper-1"
@@ -107,7 +108,7 @@ def _export_audio_chunk(
         audio_bitrate,
         output_path,
     ]
-    subprocess.run(command, check=True, capture_output=True)
+    run_managed(command, check=True, capture_output=True)
 
 
 def _response_to_dict(response: Any) -> dict[str, Any]:

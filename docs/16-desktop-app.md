@@ -25,6 +25,12 @@ $env:PYTHONPATH='src'
 python -m vazer desktop
 ```
 
+Alternativ direkt ueber den Launcher im Repo:
+
+```text
+VAZer Desktop.cmd
+```
+
 Optional:
 
 ```powershell
@@ -40,10 +46,12 @@ Das heisst:
 
 - kein Browser-Upload
 - keine Kopie ins Workspace nur fuer den Import
+- kein separater HTTP-Server im Desktop-Modus
 - Projektartefakte liegen trotzdem im lokalen VAZer-Workspace
 - der finale Render landet bei Desktop-Referenzprojekten standardmaessig im gemeinsamen Quellordner
 - wenn die Quelldateien aus verschiedenen Ordnern kommen, faellt VAZer auf den Projekt-Workspace als Output-Ziel zurueck
 - offensichtliche Sidecar-/Hidden-Dateien wie `._*.MXF` werden beim Import ignoriert
+- beim Schliessen werden laufende Jobs abgebrochen und registrierte `ffmpeg`/`ffprobe`-Prozesse beendet
 
 Das ist fuer lange 4K-Theatermitschnitte deutlich sinnvoller als ein Browser-Upload.
 

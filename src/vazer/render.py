@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from . import __version__
+from .process_manager import popen_managed, unregister_process
 
 
 def _utc_timestamp() -> str:
@@ -210,7 +211,7 @@ def run_render(
     command[1:1] = extra
 
     output_duration_seconds = float(manifest["output"]["duration_seconds"])
-    process = subprocess.Popen(
+    process = popen_managed(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -221,37 +222,40 @@ def run_render(
 
     latest_progress = 0.0
     progress_payload: dict[str, str] = {}
-    assert process.stdout is not None
-    for raw_line in process.stdout:
-        line = raw_line.strip()
-        if not line or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        progress_payload[key] = value
-        if key not in {"out_time_ms", "out_time_us", "progress"}:
-            continue
-
-        out_time_seconds = None
-        if "out_time_us" in progress_payload:
-            try:
-                out_time_seconds = float(progress_payload["out_time_us"]) / 1_000_000.0
-            except ValueError:
-                out_time_seconds = None
-        elif "out_time_ms" in progress_payload:
-            try:
-                out_time_seconds = float(progress_payload["out_time_ms"]) / 1_000_000.0
-            except ValueError:
-                out_time_seconds = None
-
-        if out_time_seconds is not None and output_duration_seconds > 0:
-            latest_progress = min(100.0, max(0.0, (out_time_seconds / output_duration_seconds) * 100.0))
-            if callable(on_progress):
-                on_progress(latest_progress, progress_payload.get("progress") or "continue")
-
     stderr_output = ""
-    if process.stderr is not None:
-        stderr_output = process.stderr.read()
-    return_code = process.wait()
+    try:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.strip()
+            if not line or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            progress_payload[key] = value
+            if key not in {"out_time_ms", "out_time_us", "progress"}:
+                continue
+
+            out_time_seconds = None
+            if "out_time_us" in progress_payload:
+                try:
+                    out_time_seconds = float(progress_payload["out_time_us"]) / 1_000_000.0
+                except ValueError:
+                    out_time_seconds = None
+            elif "out_time_ms" in progress_payload:
+                try:
+                    out_time_seconds = float(progress_payload["out_time_ms"]) / 1_000_000.0
+                except ValueError:
+                    out_time_seconds = None
+
+            if out_time_seconds is not None and output_duration_seconds > 0:
+                latest_progress = min(100.0, max(0.0, (out_time_seconds / output_duration_seconds) * 100.0))
+                if callable(on_progress):
+                    on_progress(latest_progress, progress_payload.get("progress") or "continue")
+
+        if process.stderr is not None:
+            stderr_output = process.stderr.read()
+        return_code = process.wait()
+    finally:
+        unregister_process(process)
     if return_code != 0:
         raise RuntimeError(stderr_output.strip() or f"ffmpeg exited with code {return_code}.")
 
