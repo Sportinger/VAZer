@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha1
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -56,7 +57,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         {"id": "transcript", "symbol": "TXT", "label": "Text", "detail": "Whisper"},
         {"id": "analysis", "symbol": "CV", "label": "Bild", "detail": "Schaerfe + Motion"},
         {"id": "cut", "symbol": "CUT", "label": "Schnitt", "detail": "Draft + Repair"},
-        {"id": "render", "symbol": "OUT", "label": "Export", "detail": "MP4 / PRPROJ"},
+        {"id": "render", "symbol": "OUT", "label": "Export", "detail": "MP4 / XML"},
     ]
     STAGE_TO_PHASE_ID = {
         "queued": "probe",
@@ -71,6 +72,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         "validate": "cut",
         "repair": "cut",
         "exporting_premiere": "render",
+        "exporting_premiere_xml": "render",
         "rendering": "render",
         "completed": "render",
     }
@@ -445,8 +447,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             output_mode_label.setObjectName("modeLabel")
             self.output_mode_combo = QComboBox()
             self.output_mode_combo.setObjectName("modeCombo")
-            self.output_mode_combo.addItem("MP4 + Premiere-Projekt", OUTPUT_MODE_RENDER_AND_PREMIERE)
-            self.output_mode_combo.addItem("Nur Premiere-Projekt", OUTPUT_MODE_PREMIERE_ONLY)
+            self.output_mode_combo.addItem("MP4 + Premiere XML", OUTPUT_MODE_RENDER_AND_PREMIERE)
+            self.output_mode_combo.addItem("Nur Premiere XML", OUTPUT_MODE_PREMIERE_ONLY)
             output_mode_column.addWidget(output_mode_label)
             output_mode_column.addWidget(self.output_mode_combo)
             footer_layout.addLayout(output_mode_column)
@@ -700,11 +702,11 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
         def closeEvent(self, event) -> None:  # noqa: N802
             active_job = self._find_active_job()
-            is_busy = active_job is not None and active_job.get("status") in {
+            active_status = None if active_job is None else str(active_job.get("status") or "")
+            is_busy = active_status in {
                 "queued",
                 "running",
                 "pause_requested",
-                "paused",
                 "review_required",
             }
             if is_busy:
@@ -719,8 +721,11 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                     event.ignore()
                     return
 
-            self._shutdown_app_state()
+            force_process_exit = is_busy
+            self._shutdown_app_state(force_process_exit=force_process_exit)
             event.accept()
+            if force_process_exit:
+                os._exit(0)
 
         def import_paths(self, paths: list[str]) -> None:
             if self._active_job_is_busy():
@@ -823,8 +828,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 found.append("Analyse")
             if artifact_flags.get("planning") or artifact_flags.get("repair"):
                 found.append("Schnittdaten")
-            if artifact_flags.get("premiere"):
-                found.append("Premiere")
+            if artifact_flags.get("premiere_xml") or artifact_flags.get("premiere_project") or artifact_flags.get("premiere"):
+                found.append("Premiere XML")
             if artifact_flags.get("render"):
                 found.append("MP4")
             if found:
@@ -1195,8 +1200,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
         def _output_mode_label(self, value: Any) -> str:
             if str(value or "") == OUTPUT_MODE_PREMIERE_ONLY:
-                return "Nur Premiere-Projekt"
-            return "MP4 + Premiere-Projekt"
+                return "Nur Premiere XML"
+            return "MP4 + Premiere XML"
 
         def _update_phase_strip(self, active_job: dict[str, Any] | None) -> None:
             phase_states = self._build_phase_states(active_job)
@@ -1433,7 +1438,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return parent.name or "VAZ Projekt"
             return f"VAZ Import ({len(resolved)} Dateien)"
 
-        def _shutdown_app_state(self) -> None:
+        def _shutdown_app_state(self, *, force_process_exit: bool = False) -> None:
             if self._shutdown_started:
                 return
             self._shutdown_started = True
@@ -1441,6 +1446,11 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 self.app_state.shutdown()
             except Exception:
                 pass
+            if force_process_exit:
+                try:
+                    self.timer.stop()
+                except Exception:
+                    pass
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow(UIState(Path(workspace)))

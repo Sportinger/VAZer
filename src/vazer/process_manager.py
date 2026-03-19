@@ -112,6 +112,25 @@ def _apply_windows_no_window(kwargs: dict[str, Any]) -> dict[str, Any]:
     return adjusted
 
 
+def _taskkill_process_tree(pid: int) -> None:
+    if os.name != "nt":
+        return
+    kwargs = _apply_windows_no_window(
+        {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "check": False,
+        }
+    )
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            **kwargs,
+        )
+    except Exception:
+        pass
+
+
 def run_managed(
     args: list[str],
     *,
@@ -197,8 +216,20 @@ def terminate_registered_processes(*, timeout_seconds: float = 3.0) -> None:
             try:
                 process.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
-                pass
+                _taskkill_process_tree(process.pid)
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
+            unregister_process(process)
+
+    if os.name == "nt":
+        with _LOCK:
+            lingering = list(_ACTIVE_PROCESSES.values())
+        for process in lingering:
+            if process.poll() is None:
+                _taskkill_process_tree(process.pid)
             unregister_process(process)
 
 
