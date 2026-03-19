@@ -591,7 +591,7 @@ def build_baseline_cut_plan(
         "height": primary_video.get("height") or 1080,
         "fps": primary_video.get("frame_rate") or 25.0,
         "pixel_format": "yuv420p",
-        "video_codec": "libx264",
+        "video_codec": "h264_nvenc",
         "audio_codec": "aac",
     }
 

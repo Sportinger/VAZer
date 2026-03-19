@@ -10,6 +10,9 @@ from . import __version__
 from .process_manager import popen_managed, unregister_process
 
 
+_ENCODER_AVAILABILITY_CACHE: dict[str, bool] = {}
+
+
 def _utc_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -20,6 +23,48 @@ def load_cut_plan(path: str) -> dict[str, Any]:
 
 def _format_seconds(value: float) -> str:
     return f"{value:.6f}"
+
+
+def _ffmpeg_has_encoder(name: str) -> bool:
+    normalized = str(name or "").strip()
+    if not normalized:
+        return False
+    cached = _ENCODER_AVAILABILITY_CACHE.get(normalized)
+    if cached is not None:
+        return cached
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        available = result.returncode == 0 and normalized in (result.stdout or "")
+    except Exception:
+        available = False
+    _ENCODER_AVAILABILITY_CACHE[normalized] = available
+    return available
+
+
+def _resolve_video_codec(requested_codec: str) -> str:
+    normalized = str(requested_codec or "").strip().lower()
+    if normalized in {"", "auto", "default", "libx264"}:
+        normalized = "h264_nvenc"
+    if not _ffmpeg_has_encoder(normalized):
+        raise ValueError(
+            f"Requested GPU encoder '{normalized}' is not available in ffmpeg. "
+            "CPU fallback is currently disabled."
+        )
+    return normalized
+
+
+def _video_codec_args(codec: str) -> list[str]:
+    if codec == "h264_nvenc":
+        return ["-preset", "p5", "-cq", "21", "-b:v", "0"]
+    return []
 
 
 def _build_filtergraph(cut_plan: dict[str, Any], input_indexes: dict[str, int]) -> str:
@@ -101,7 +146,9 @@ def build_render_scaffold(
 
     filtergraph_path.write_text(filtergraph, encoding="utf-8")
 
-    render_defaults = cut_plan["render_defaults"]
+    render_defaults = json.loads(json.dumps(cut_plan["render_defaults"]))
+    resolved_video_codec = _resolve_video_codec(str(render_defaults.get("video_codec") or ""))
+    render_defaults["video_codec"] = resolved_video_codec
     command = [
         "ffmpeg",
         "-i",
@@ -118,7 +165,8 @@ def build_render_scaffold(
             "-map",
             "[aout]",
             "-c:v",
-            str(render_defaults["video_codec"]),
+            resolved_video_codec,
+            *_video_codec_args(resolved_video_codec),
             "-pix_fmt",
             str(render_defaults["pixel_format"]),
             "-c:a",
