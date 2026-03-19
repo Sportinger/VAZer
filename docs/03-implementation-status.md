@@ -23,6 +23,7 @@ Update vom 2026-03-19:
 - starke Kurzclips duerfen notfalls mit genau einem sehr starken Anchor validieren statt pauschal zu scheitern
 - Desktop zeigt jetzt pro Datei farbige Fortschrittsbalken
 - Transcript und CV koennen im Desktop-Lauf parallel zum Media-Block anlaufen
+- das Zielbild fuer einen schnellen Analysepfad ist jetzt separat dokumentiert: sequential low-res global pass, lokaler Dense-Pass an Cut-Kandidaten, GPU-Option mit CPU-Fallback und bessere Schärfe-/Bewegungsmetriken
 
 Warum Python fuer diesen Start:
 
@@ -214,4 +215,5 @@ python -m vazer analyze roles --sync-map .\artifacts\sync_map.json --out .\artif
 - sichtbarer Review-/Freigabe-Loop fuer spaetere Transcript-, Analyse- und Draft-Schritte
 - Packaging der Desktop-App zu einer echten `.exe`
 - spaeter piecewise Sync fuer Clips, bei denen auch der Rescue-Pfad nicht reicht
+- die neue schnelle Analyse-Pipeline in Code: globaler sequentieller Low-Res-Pass, lokaler Dense-Pass und GPU-Fallback
 - dichtere CV-Signale wie Face-Presence, Shot-Boundaries und Framing
