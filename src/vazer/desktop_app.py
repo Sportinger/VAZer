@@ -18,7 +18,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
     try:
         import cv2
         from PySide6.QtCore import Qt, QTimer
-        from PySide6.QtGui import QDragEnterEvent, QDropEvent, QImage, QPixmap
+        from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QPainter, QPainterPath, QPen, QPixmap
         from PySide6.QtWidgets import (
             QApplication,
             QFileDialog,
@@ -40,6 +40,121 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
     from .fftools import probe_media
     from .ui_server import UIState
+
+    PIPELINE_PHASES = [
+        {"id": "probe", "symbol": "ING", "label": "Import", "detail": "Probe"},
+        {"id": "classify", "symbol": "SET", "label": "Setup", "detail": "Master + Cams"},
+        {"id": "roles", "symbol": "AI", "label": "Rollen", "detail": "Totale / HT / Close"},
+        {"id": "sync", "symbol": "A/V", "label": "Sync", "detail": "Audio"},
+        {"id": "transcript", "symbol": "TXT", "label": "Text", "detail": "Whisper"},
+        {"id": "analysis", "symbol": "CV", "label": "Bild", "detail": "Schaerfe + Motion"},
+        {"id": "cut", "symbol": "CUT", "label": "Schnitt", "detail": "Draft + Repair"},
+        {"id": "render", "symbol": "MP4", "label": "Film", "detail": "FHD Render"},
+    ]
+    STAGE_TO_PHASE_ID = {
+        "queued": "probe",
+        "probing": "probe",
+        "classified": "classify",
+        "roles": "roles",
+        "role_review": "roles",
+        "syncing": "sync",
+        "transcribing": "transcript",
+        "analysis": "analysis",
+        "planning": "cut",
+        "validate": "cut",
+        "repair": "cut",
+        "rendering": "render",
+        "completed": "render",
+    }
+    PHASE_INDEX = {phase["id"]: index for index, phase in enumerate(PIPELINE_PHASES)}
+    PHASE_PROGRESS_RANGES = {
+        "probe": (0.0, 12.0),
+        "classify": (12.0, 22.0),
+        "roles": (22.0, 30.0),
+        "sync": (30.0, 46.0),
+        "transcript": (46.0, 58.0),
+        "analysis": (58.0, 70.0),
+        "cut": (70.0, 86.0),
+        "render": (86.0, 100.0),
+    }
+
+    class PhaseBadge(QWidget):
+        def __init__(self, symbol: str) -> None:
+            super().__init__()
+            self.symbol = symbol
+            self.phase_state = "pending"
+            self.fill_percent = 0.0
+            self.setMinimumSize(60, 60)
+            self.setMaximumHeight(60)
+
+        def set_visual_state(self, phase_state: str, fill_percent: float) -> None:
+            bounded_fill = max(0.0, min(100.0, float(fill_percent)))
+            if self.phase_state == phase_state and abs(self.fill_percent - bounded_fill) < 0.01:
+                return
+            self.phase_state = phase_state
+            self.fill_percent = bounded_fill
+            self.update()
+
+        def paintEvent(self, _event) -> None:  # type: ignore[override]
+            palettes = {
+                "pending": {
+                    "background": QColor("#1f2630"),
+                    "border": QColor(255, 255, 255, 24),
+                    "fill": QColor(255, 255, 255, 10),
+                    "text": QColor("#f5efe4"),
+                },
+                "active": {
+                    "background": QColor("#221b16"),
+                    "border": QColor("#ef9d4d"),
+                    "fill": QColor("#ef9d4d"),
+                    "text": QColor("#17110d"),
+                },
+                "review": {
+                    "background": QColor("#162031"),
+                    "border": QColor("#70abff"),
+                    "fill": QColor("#70abff"),
+                    "text": QColor("#101319"),
+                },
+                "done": {
+                    "background": QColor("#152119"),
+                    "border": QColor("#63c178"),
+                    "fill": QColor("#63c178"),
+                    "text": QColor("#102013"),
+                },
+                "error": {
+                    "background": QColor("#261718"),
+                    "border": QColor("#e26060"),
+                    "fill": QColor("#e26060"),
+                    "text": QColor("#210d0d"),
+                },
+            }
+            palette = palettes.get(self.phase_state, palettes["pending"])
+
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = self.rect().adjusted(1, 1, -1, -1)
+            path = QPainterPath()
+            path.addRoundedRect(rect, 16, 16)
+
+            painter.fillPath(path, palette["background"])
+            if self.fill_percent > 0.0:
+                fill_height = rect.height() * (self.fill_percent / 100.0)
+                fill_rect = rect.adjusted(0, int(rect.height() - fill_height), 0, 0)
+                painter.save()
+                painter.setClipPath(path)
+                painter.fillRect(fill_rect, palette["fill"])
+                painter.restore()
+
+            painter.setPen(QPen(palette["border"], 1.4))
+            painter.drawPath(path)
+
+            font = painter.font()
+            font.setFamily("Bahnschrift")
+            font.setBold(True)
+            font.setPointSize(10)
+            painter.setFont(font)
+            painter.setPen(palette["text"])
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.symbol)
 
     class MainWindow(QMainWindow):
         def __init__(self, app_state: UIState) -> None:
@@ -86,6 +201,51 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             header_layout.addWidget(title)
             header_layout.addWidget(subtitle)
             layout.addWidget(header)
+
+            phase_strip = QFrame()
+            phase_strip.setObjectName("phaseStrip")
+            phase_layout = QHBoxLayout(phase_strip)
+            phase_layout.setContentsMargins(0, 0, 0, 0)
+            phase_layout.setSpacing(8)
+            self.phase_widgets: list[dict[str, Any]] = []
+            self.phase_connectors: list[QLabel] = []
+            for index, phase in enumerate(PIPELINE_PHASES):
+                if index > 0:
+                    connector = QLabel("->")
+                    connector.setObjectName("phaseConnector")
+                    connector.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    phase_layout.addWidget(connector)
+                    self.phase_connectors.append(connector)
+
+                node = QFrame()
+                node.setObjectName("phaseNode")
+                node_layout = QHBoxLayout(node)
+                node_layout.setContentsMargins(12, 10, 12, 10)
+                node_layout.setSpacing(10)
+                badge = PhaseBadge(phase["symbol"])
+                badge.setObjectName("phaseBadge")
+                text_column = QVBoxLayout()
+                text_column.setContentsMargins(0, 0, 0, 0)
+                text_column.setSpacing(2)
+                name = QLabel(phase["label"])
+                name.setObjectName("phaseName")
+                detail = QLabel(phase["detail"])
+                detail.setObjectName("phaseDetail")
+                text_column.addWidget(name)
+                text_column.addWidget(detail)
+                node_layout.addWidget(badge, 0)
+                node_layout.addLayout(text_column, 1)
+                phase_layout.addWidget(node, 1)
+                self.phase_widgets.append(
+                    {
+                        "id": phase["id"],
+                        "node": node,
+                        "badge": badge,
+                        "name": name,
+                        "detail": detail,
+                    }
+                )
+            layout.addWidget(phase_strip)
 
             hint = QLabel("Droppe Dateien oder einen ganzen Ordner irgendwo in dieses Fenster.")
             hint.setObjectName("hint")
@@ -170,6 +330,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.progress_bar = QProgressBar()
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
+            self.progress_bar.hide()
             status_column.addWidget(self.status_label)
             status_column.addWidget(self.progress_bar)
             footer_layout.addLayout(status_column, 1)
@@ -216,6 +377,34 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                   border: 1px solid rgba(255,255,255,0.08);
                   border-radius: 18px;
                 }
+                QFrame#phaseStrip {
+                  background: transparent;
+                }
+                QFrame#phaseNode {
+                  background: rgba(255,255,255,0.03);
+                  border: 1px solid rgba(255,255,255,0.07);
+                  border-radius: 18px;
+                }
+                QFrame#phaseNode[phaseState="pending"] {
+                  background: rgba(255,255,255,0.025);
+                  border-color: rgba(255,255,255,0.06);
+                }
+                QFrame#phaseNode[phaseState="active"] {
+                  background: rgba(239,157,77,0.10);
+                  border-color: rgba(239,157,77,0.50);
+                }
+                QFrame#phaseNode[phaseState="review"] {
+                  background: rgba(112,171,255,0.10);
+                  border-color: rgba(112,171,255,0.50);
+                }
+                QFrame#phaseNode[phaseState="done"] {
+                  background: rgba(99,193,120,0.10);
+                  border-color: rgba(99,193,120,0.45);
+                }
+                QFrame#phaseNode[phaseState="error"] {
+                  background: rgba(226,96,96,0.10);
+                  border-color: rgba(226,96,96,0.45);
+                }
                 QLabel#eyebrow {
                   color: #ef9d4d;
                   font-size: 11px;
@@ -235,6 +424,34 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                   font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
                   font-size: 22px;
                   font-weight: 700;
+                }
+                QLabel#phaseName {
+                  font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
+                  font-size: 15px;
+                  font-weight: 700;
+                }
+                QLabel#phaseDetail {
+                  color: #b9b2a3;
+                  font-size: 11px;
+                }
+                QLabel#phaseConnector {
+                  color: rgba(255,255,255,0.18);
+                  font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
+                  font-size: 19px;
+                  font-weight: 700;
+                  min-width: 18px;
+                }
+                QLabel#phaseConnector[phaseState="active"] {
+                  color: #ef9d4d;
+                }
+                QLabel#phaseConnector[phaseState="review"] {
+                  color: #70abff;
+                }
+                QLabel#phaseConnector[phaseState="done"] {
+                  color: #63c178;
+                }
+                QLabel#phaseConnector[phaseState="error"] {
+                  color: #e26060;
                 }
                 QListWidget, QLabel#preview, QLabel#reviewImage {
                   background: #11161d;
@@ -415,6 +632,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             active_project = self._find_active_project()
             active_job = self._find_active_job()
             role_review_payload = self._build_role_review_payload(active_project, active_job)
+            self._update_phase_strip(active_job)
 
             if active_project is None and active_job is None and not self.staged_files:
                 self.file_meta.setText("Droppe Dateien oder einen Ordner. Die Liste sammelt alles fuer genau einen Lauf.")
@@ -666,6 +884,100 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             if active_job is None:
                 return False
             return active_job.get("status") in {"queued", "running", "pause_requested", "paused", "review_required"}
+
+        def _update_phase_strip(self, active_job: dict[str, Any] | None) -> None:
+            phase_states = self._build_phase_states(active_job)
+            phase_fill_percents = self._build_phase_fill_percents(active_job)
+            for widget_info in self.phase_widgets:
+                state = phase_states.get(widget_info["id"], "pending")
+                self._set_phase_state(widget_info["node"], state)
+                self._set_phase_state(widget_info["name"], state)
+                self._set_phase_state(widget_info["detail"], state)
+                widget_info["badge"].set_visual_state(state, phase_fill_percents.get(widget_info["id"], 0.0))
+
+            for index, connector in enumerate(self.phase_connectors, start=1):
+                left_phase = PIPELINE_PHASES[index - 1]["id"]
+                right_phase = PIPELINE_PHASES[index]["id"]
+                left_state = phase_states.get(left_phase, "pending")
+                right_state = phase_states.get(right_phase, "pending")
+                connector_state = "pending"
+                if "error" in {left_state, right_state}:
+                    connector_state = "error"
+                elif right_state == "done":
+                    connector_state = "done"
+                elif right_state == "review":
+                    connector_state = "review"
+                elif right_state == "active" or (left_state == "done" and right_state in {"pending", "active"}):
+                    connector_state = "active" if right_state == "active" else "done"
+                self._set_phase_state(connector, connector_state)
+
+        def _build_phase_states(self, active_job: dict[str, Any] | None) -> dict[str, str]:
+            states = {phase["id"]: "pending" for phase in PIPELINE_PHASES}
+            if active_job is None:
+                return states
+
+            status = str(active_job.get("status") or "")
+            stage = str(active_job.get("stage") or "")
+            if status == "completed":
+                return {phase["id"]: "done" for phase in PIPELINE_PHASES}
+
+            phase_id = STAGE_TO_PHASE_ID.get(stage)
+            if phase_id is None and status in {"failed", "canceled"}:
+                phase_id = self._phase_from_progress(active_job)
+            if phase_id is None:
+                return states
+
+            active_index = PHASE_INDEX.get(phase_id, 0)
+            for index, phase in enumerate(PIPELINE_PHASES):
+                if index < active_index:
+                    states[phase["id"]] = "done"
+                elif index == active_index:
+                    if status in {"failed", "canceled"}:
+                        states[phase["id"]] = "error"
+                    elif status == "review_required":
+                        states[phase["id"]] = "review"
+                    else:
+                        states[phase["id"]] = "active"
+            return states
+
+        def _build_phase_fill_percents(self, active_job: dict[str, Any] | None) -> dict[str, float]:
+            fills = {phase["id"]: 0.0 for phase in PIPELINE_PHASES}
+            if active_job is None:
+                return fills
+
+            status = str(active_job.get("status") or "")
+            if status == "completed":
+                return {phase["id"]: 100.0 for phase in PIPELINE_PHASES}
+
+            progress_percent = max(0.0, min(100.0, float(active_job.get("progress_percent") or 0.0)))
+            for phase_id, (start_percent, end_percent) in PHASE_PROGRESS_RANGES.items():
+                if progress_percent <= start_percent:
+                    fills[phase_id] = 0.0
+                elif progress_percent >= end_percent:
+                    fills[phase_id] = 100.0
+                else:
+                    fills[phase_id] = ((progress_percent - start_percent) / (end_percent - start_percent)) * 100.0
+
+            if status == "review_required":
+                phase_id = STAGE_TO_PHASE_ID.get(str(active_job.get("stage") or ""))
+                if phase_id is not None:
+                    fills[phase_id] = 100.0
+            return fills
+
+        def _phase_from_progress(self, active_job: dict[str, Any]) -> str:
+            progress_percent = float(active_job.get("progress_percent") or 0.0)
+            for phase_id, (_start_percent, end_percent) in PHASE_PROGRESS_RANGES.items():
+                if progress_percent <= end_percent:
+                    return phase_id
+            return "render"
+
+        def _set_phase_state(self, widget: QWidget, state: str) -> None:
+            if widget.property("phaseState") == state:
+                return
+            widget.setProperty("phaseState", state)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
 
         def _build_role_review_payload(
             self,

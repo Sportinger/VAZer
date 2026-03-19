@@ -13,7 +13,8 @@ Der aktuelle Minimalstand:
 - eine reduzierte Dateiliste plus Preview
 - Mittelframe-Preview pro gewaehlter Datei
 - ein minimaler `VAZ`-Startbutton
-- Fortschritt fuer den aktiven Lauf
+- eine Phasenleiste oben fuer den gesamten Theater-VAZ-Flow
+- die Phasen-Badges laufen von unten nach oben voll statt eines klassischen Prozentbalkens
 - Rollen-Review-Stopp vor dem Sync
 - Hintergrundjob laeuft jetzt bis zum geschnittenen FHD-Render durch
 
