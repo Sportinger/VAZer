@@ -169,6 +169,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.media_cache: dict[str, Any] = {}
             self.current_preview_pixmap: QPixmap | None = None
             self.current_preview_key: str | None = None
+            self.current_role_review_signature: str | None = None
             self._shutdown_started = False
 
             self.setWindowTitle("VAZer")
@@ -282,7 +283,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             preview_layout.addWidget(preview_title)
             self.review_widget = QFrame()
             self.review_widget.setObjectName("reviewStrip")
-            review_layout = QHBoxLayout(self.review_widget)
+            review_layout = QVBoxLayout(self.review_widget)
             review_layout.setContentsMargins(0, 0, 0, 0)
             review_layout.setSpacing(10)
             self.review_cards: list[tuple[QLabel, QLabel]] = []
@@ -295,7 +296,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 image_label = QLabel("Warte auf Mittelframe ...")
                 image_label.setObjectName("reviewImage")
                 image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                image_label.setMinimumHeight(160)
+                image_label.setMinimumHeight(140)
+                image_label.setMaximumHeight(180)
                 image_label.setWordWrap(True)
                 caption_label = QLabel("")
                 caption_label.setObjectName("reviewCaption")
@@ -741,6 +743,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self._show_selected_file_preview()
 
         def _show_selected_file_preview(self) -> None:
+            self.current_role_review_signature = None
             self.review_widget.hide()
             self.preview_frame.show()
             file_info = self._selected_file_info()
@@ -775,6 +778,25 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self._refresh_preview_pixmap()
 
         def _show_role_review(self, payload: dict[str, Any]) -> None:
+            signature = json.dumps(
+                {
+                    "summary_text": payload.get("summary_text"),
+                    "source_text": payload.get("source_text"),
+                    "cards": [
+                        {
+                            "frame_path": card.get("frame_path"),
+                            "display_name": card.get("display_name"),
+                            "role": card.get("role"),
+                        }
+                        for card in payload.get("cards") or []
+                    ],
+                },
+                sort_keys=True,
+            )
+            if signature == self.current_role_review_signature:
+                return
+
+            self.current_role_review_signature = signature
             self.preview_frame.hide()
             self.review_widget.show()
             summary_text = payload.get("summary_text") or "Mittelframes fuer die Rollenpruefung."
@@ -796,7 +818,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                         image_label.setText("Frame konnte nicht geladen werden.")
                     else:
                         scaled = pixmap.scaled(
-                            image_label.size(),
+                            360,
+                            190,
                             Qt.AspectRatioMode.KeepAspectRatio,
                             Qt.TransformationMode.SmoothTransformation,
                         )
@@ -807,16 +830,19 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                     image_label.setText("Warte auf Mittelframe ...")
 
                 role = card.get("role")
-                confidence = card.get("confidence")
-                reason = card.get("reason")
-                lines = [str(card.get("display_name") or card.get("asset_id") or "Kamera")]
+                display_name = str(card.get("display_name") or card.get("asset_id") or "Kamera")
+                role_color = {
+                    "totale": "#63c178",
+                    "halbtotale": "#70abff",
+                    "close": "#ef9d4d",
+                }.get(str(role or "").lower(), "#f5efe4")
                 if role:
-                    lines.append(f"Rolle: {role}")
-                if confidence:
-                    lines.append(f"Confidence: {confidence}")
-                if reason:
-                    lines.append(str(reason))
-                caption_label.setText("\n".join(lines))
+                    caption_label.setText(
+                        f"{display_name}<br>"
+                        f"<span style=\"color:{role_color}; font-weight:700;\">{role}</span>"
+                    )
+                else:
+                    caption_label.setText(display_name)
 
         def _refresh_preview_pixmap(self) -> None:
             if self.current_preview_pixmap is None:
