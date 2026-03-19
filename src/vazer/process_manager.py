@@ -1,11 +1,30 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 from typing import Any
 
 _LOCK = threading.Lock()
 _ACTIVE_PROCESSES: dict[int, subprocess.Popen[Any]] = {}
+
+
+def _apply_windows_no_window(kwargs: dict[str, Any]) -> dict[str, Any]:
+    if os.name != "nt":
+        return kwargs
+
+    adjusted = dict(kwargs)
+    creationflags = int(adjusted.get("creationflags") or 0)
+    create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    adjusted["creationflags"] = creationflags | create_no_window
+
+    startupinfo = adjusted.get("startupinfo")
+    if startupinfo is None:
+        startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    adjusted["startupinfo"] = startupinfo
+    return adjusted
 
 
 def run_managed(
@@ -18,6 +37,7 @@ def run_managed(
     errors: str | None = None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess[Any]:
+    kwargs = _apply_windows_no_window(kwargs)
     if capture_output:
         kwargs.setdefault("stdout", subprocess.PIPE)
         kwargs.setdefault("stderr", subprocess.PIPE)
@@ -53,6 +73,7 @@ def popen_managed(
     args: list[str],
     **kwargs: Any,
 ) -> subprocess.Popen[Any]:
+    kwargs = _apply_windows_no_window(kwargs)
     process = subprocess.Popen(args, **kwargs)
     with _LOCK:
         _ACTIVE_PROCESSES[process.pid] = process
