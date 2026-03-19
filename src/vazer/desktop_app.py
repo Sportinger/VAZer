@@ -131,6 +131,40 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 )
                 layout.addWidget(progress_bar)
 
+            sub_progress = file_info.get("ui_sub_progress") or []
+            if isinstance(sub_progress, list):
+                for sub_entry in sub_progress:
+                    if not isinstance(sub_entry, dict):
+                        continue
+                    sub_percent = sub_entry.get("percent")
+                    if sub_percent is None:
+                        continue
+                    sub_bar = QProgressBar()
+                    sub_bar.setRange(0, 100)
+                    sub_bar.setValue(int(round(float(sub_percent))))
+                    sub_bar.setTextVisible(True)
+                    sub_label = str(sub_entry.get("label") or "").strip()
+                    sub_bar.setFormat(f"{sub_label} %p%" if sub_label else "%p%")
+                    sub_bar.setObjectName("fileRowSubProgress")
+                    sub_color = str(sub_entry.get("color") or "#b9b2a3")
+                    sub_bar.setStyleSheet(
+                        f"""
+                        QProgressBar {{
+                          min-height: 7px;
+                          max-height: 7px;
+                          border: 1px solid rgba(255,255,255,0.06);
+                          border-radius: 999px;
+                          background: rgba(255,255,255,0.04);
+                          color: transparent;
+                        }}
+                        QProgressBar::chunk {{
+                          border-radius: 999px;
+                          background: {sub_color};
+                        }}
+                        """
+                    )
+                    layout.addWidget(sub_bar)
+
     class PhaseBadge(QWidget):
         def __init__(self, symbol: str) -> None:
             super().__init__()
@@ -298,6 +332,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                         "badge": badge,
                         "name": name,
                         "detail": detail,
+                        "default_detail": phase["detail"],
                     }
                 )
             layout.addWidget(phase_strip)
@@ -763,8 +798,12 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return
 
             self.progress_bar.setValue(int(round(float(active_job.get("progress_percent") or 0.0))))
+            stage_label = str(active_job.get("stage_label") or "-")
+            analysis_suffix = self._analysis_status_suffix(active_job)
+            if analysis_suffix:
+                stage_label = f"{stage_label} | {analysis_suffix}"
             self.status_label.setText(
-                f"{active_job.get('stage_label') or '-'} | {active_job.get('message') or '-'}"
+                f"{stage_label} | {active_job.get('message') or '-'}"
             )
             review_required = active_job.get("status") == "review_required"
             self.start_button.setEnabled(False)
@@ -1007,6 +1046,35 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return False
             return active_job.get("status") in {"queued", "running", "pause_requested", "paused", "review_required"}
 
+        def _analysis_stage_detail(self, active_job: dict[str, Any] | None) -> str | None:
+            if active_job is None:
+                return None
+
+            analysis_hint = active_job.get("analysis_pass")
+            if not isinstance(analysis_hint, str) or not analysis_hint.strip():
+                analysis_progress = active_job.get("analysis_progress")
+                if isinstance(analysis_progress, dict):
+                    analysis_hint = (
+                        analysis_progress.get("pass")
+                        or analysis_progress.get("phase")
+                        or analysis_progress.get("scope")
+                    )
+
+            if not isinstance(analysis_hint, str):
+                return None
+
+            normalized = analysis_hint.strip().lower()
+            if normalized in {"global", "global_pass", "coarse", "scan"}:
+                return "Global pass"
+            if normalized in {"local", "local_pass", "dense", "refine", "refinement"}:
+                return "Local pass"
+            if normalized in {"global_local", "global+local", "both", "all"}:
+                return "Global + local"
+            return None
+
+        def _analysis_status_suffix(self, active_job: dict[str, Any] | None) -> str | None:
+            return self._analysis_stage_detail(active_job)
+
         def _update_phase_strip(self, active_job: dict[str, Any] | None) -> None:
             phase_states = self._build_phase_states(active_job)
             phase_fill_percents = self._build_phase_fill_percents(active_job)
@@ -1016,6 +1084,12 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 self._set_phase_state(widget_info["name"], state)
                 self._set_phase_state(widget_info["detail"], state)
                 widget_info["badge"].set_visual_state(state, phase_fill_percents.get(widget_info["id"], 0.0))
+                if widget_info["id"] == "analysis":
+                    widget_info["detail"].setText(
+                        self._analysis_stage_detail(active_job) or widget_info["default_detail"]
+                    )
+                elif widget_info["detail"].text() != widget_info["default_detail"]:
+                    widget_info["detail"].setText(widget_info["default_detail"])
 
             for index, connector in enumerate(self.phase_connectors, start=1):
                 left_phase = PIPELINE_PHASES[index - 1]["id"]

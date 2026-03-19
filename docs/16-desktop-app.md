@@ -12,10 +12,11 @@ Der aktuelle Minimalstand:
 - Drag-and-drop ueber das ganze Fenster
 - eine reduzierte Dateiliste plus Preview
 - Mittelframe-Preview pro gewaehlter Datei
+- per-Datei Fortschrittsbalken, inklusive optionaler Unterfortschritte
 - ein minimaler `VAZ`-Startbutton
 - eine Phasenleiste oben fuer den gesamten Theater-VAZ-Flow
 - die Phasen-Badges laufen von unten nach oben voll statt eines klassischen Prozentbalkens
-- pro Datei farbige Fortschrittsbalken direkt in der Liste
+- die Analyse-Phase kann optional `Global` und `Local` getrennt beschriften, wenn der Job das hergibt
 - Rollen-Review-Stopp vor dem Sync
 - Transcript und technische Analyse laufen jetzt parallel zum Sync-/Media-Block
 - Hintergrundjob laeuft jetzt bis zum geschnittenen FHD-Render durch
@@ -69,6 +70,8 @@ Der Desktop-Job macht bisher:
 6. erst nach `Weiter` Audio-Sync gegen den Master starten
 7. Masterspur mit `whisper-1` transkribieren
 8. billige technische Analyse rechnen
+   - die UI akzeptiert spaeter optional `analysis_pass=global|local` fuer klarere Beschriftung
+   - pro Datei koennen mehrere kleine Fortschrittsbalken als `ui_sub_progress` erscheinen
 9. chunked AI-Draft ueber die ganze Show bauen
 10. Cuts validieren und lokal reparieren
 11. FHD-Render ausgeben
