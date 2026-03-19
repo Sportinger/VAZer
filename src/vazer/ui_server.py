@@ -23,7 +23,7 @@ from .analysis import (
     write_analysis_map,
 )
 from .camera_roles import build_camera_role_artifact, infer_camera_role_from_name, write_camera_role_artifact
-from .cut_plan import write_cut_plan
+from .cut_plan import _coverage_window, _require_duration, write_cut_plan
 from .cut_review import CutValidationOptions, build_cut_validation_report, repair_cut_plan, write_cut_validation_report
 from .fftools import MediaInfo, probe_media
 from .premiere_xml import export_premiere_xml
@@ -267,6 +267,7 @@ def _load_reusable_cut_plan(
     camera_paths: list[str],
     *,
     planning_stage: str | None = None,
+    sync_map: dict[str, Any] | None = None,
     source_sync_map_path: str | None = None,
     source_analysis_map_path: str | None = None,
     source_transcript_path: str | None = None,
@@ -295,6 +296,306 @@ def _load_reusable_cut_plan(
     if not referenced_paths or not referenced_paths.issubset(camera_path_set):
         return None
 
+    coverage_windows_by_path: dict[str, Any] = {}
+    if isinstance(sync_map, dict) and sync_map.get("schema_version") == "vazer.sync_map.v1":
+        sync_master_payload = sync_map.get("master") or {}
+        if isinstance(sync_master_payload, dict):
+            try:
+                sync_master_duration_seconds = _require_duration(sync_master_payload, "Master audio", master_path)
+            except Exception:
+                sync_master_duration_seconds = 0.0
+            if sync_master_duration_seconds > 0:
+                for entry in sync_map.get("entries", []):
+                    if not isinstance(entry, dict) or entry.get("status") != "synced":
+                        continue
+                    if (coverage := _coverage_window(entry, sync_master_duration_seconds)) is None:
+                        continue
+                    coverage_windows_by_path[str(entry.get("path") or "")] = coverage
+
+    def _segment_valid_for_duration(segment_payload: dict[str, Any], duration_seconds: float) -> bool:
+        try:
+            source_start_seconds = float(segment_payload.get("source_start_seconds") or 0.0)
+            source_end_seconds = float(segment_payload.get("source_end_seconds") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if source_start_seconds < -0.01:
+            return False
+        if source_end_seconds - source_start_seconds <= 0.01:
+            return False
+        if source_start_seconds >= duration_seconds - 0.01:
+            return False
+        if source_end_seconds > duration_seconds + 0.25:
+            return False
+        return True
+
+    def _segment_valid_for_coverage(segment_payload: dict[str, Any]) -> bool:
+        asset_path = str(segment_payload.get("asset_path") or "")
+        coverage = coverage_windows_by_path.get(asset_path)
+        if coverage is None:
+            return True
+        try:
+            master_start_seconds = float(segment_payload.get("master_start_seconds") or 0.0)
+            master_end_seconds = float(segment_payload.get("master_end_seconds") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        if master_start_seconds < float(coverage.overlap_start_seconds) - 0.01:
+            return False
+        if master_end_seconds > float(coverage.overlap_end_seconds) + 0.01:
+            return False
+        return True
+
+    def _coverage_score(coverage: Any) -> tuple[float, float, float, float, float, str]:
+        confidence_rank = {
+            "high": 3.0,
+            "medium": 2.0,
+            "low": 1.0,
+        }.get(str(getattr(coverage, "confidence", "") or "").lower(), 0.0)
+        return (
+            confidence_rank,
+            float(getattr(coverage, "accepted_anchor_count", 0)),
+            float(getattr(coverage, "coarse_peak_ratio", 0.0)),
+            -float(abs(getattr(coverage, "predicted_drift_over_hour_seconds", 0.0))),
+            float(getattr(coverage, "overlap_end_seconds", 0.0)),
+            str(getattr(coverage, "asset_id", "")),
+        )
+
+    def _rebuild_video_timing(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rebuilt: list[dict[str, Any]] = []
+        output_cursor = 0.0
+        for index, original_segment in enumerate(segments, start=1):
+            segment = json.loads(json.dumps(original_segment))
+            master_start_seconds = float(segment["master_start_seconds"])
+            master_end_seconds = float(segment["master_end_seconds"])
+            duration_seconds = master_end_seconds - master_start_seconds
+            if duration_seconds <= 0.01:
+                continue
+            segment["id"] = f"video_{index:04d}"
+            segment["duration_seconds"] = duration_seconds
+            segment["output_start_seconds"] = output_cursor
+            output_cursor += duration_seconds
+            segment["output_end_seconds"] = output_cursor
+            rebuilt.append(segment)
+        return rebuilt
+
+    def _subsegment_from_original(
+        original_segment: dict[str, Any],
+        interval_start_seconds: float,
+        interval_end_seconds: float,
+    ) -> dict[str, Any]:
+        segment = json.loads(json.dumps(original_segment))
+        original_master_start_seconds = float(original_segment["master_start_seconds"])
+        original_source_start_seconds = float(original_segment["source_start_seconds"])
+        speed = float(original_segment.get("speed") or 0.0)
+        segment["master_start_seconds"] = interval_start_seconds
+        segment["master_end_seconds"] = interval_end_seconds
+        segment["source_start_seconds"] = original_source_start_seconds + speed * (
+            interval_start_seconds - original_master_start_seconds
+        )
+        segment["source_end_seconds"] = original_source_start_seconds + speed * (
+            interval_end_seconds - original_master_start_seconds
+        )
+        return segment
+
+    def _build_salvage_segment(
+        interval_start_seconds: float,
+        interval_end_seconds: float,
+    ) -> dict[str, Any] | None:
+        candidates = [
+            coverage
+            for coverage in coverage_windows_by_path.values()
+            if float(coverage.overlap_start_seconds) <= interval_start_seconds + 0.01
+            and float(coverage.overlap_end_seconds) >= interval_end_seconds - 0.01
+        ]
+        if not candidates:
+            return None
+        chosen = max(candidates, key=_coverage_score)
+        return {
+            "type": "camera",
+            "asset_id": chosen.asset_id,
+            "asset_path": chosen.asset_path,
+            "master_start_seconds": interval_start_seconds,
+            "master_end_seconds": interval_end_seconds,
+            "source_start_seconds": float(chosen.offset_seconds) + float(chosen.speed) * interval_start_seconds,
+            "source_end_seconds": float(chosen.offset_seconds) + float(chosen.speed) * interval_end_seconds,
+            "speed": float(chosen.speed),
+            "confidence": chosen.confidence,
+            "strategy": "reuse_tail_salvage",
+            "reason": "Existing cut segment was rebuilt to stay inside synced camera coverage.",
+            "signals": {
+                "reuse_salvage": True,
+                "confidence": chosen.confidence,
+                "coverage_end_seconds": float(chosen.overlap_end_seconds),
+            },
+        }
+
+    def _merge_adjacent_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not segments:
+            return []
+        merged = [json.loads(json.dumps(segments[0]))]
+        for segment in segments[1:]:
+            previous = merged[-1]
+            same_camera = (
+                previous.get("asset_id") == segment.get("asset_id")
+                and previous.get("asset_path") == segment.get("asset_path")
+                and abs(float(previous.get("speed") or 0.0) - float(segment.get("speed") or 0.0)) <= 1e-6
+                and previous.get("strategy") == segment.get("strategy")
+                and previous.get("reason") == segment.get("reason")
+            )
+            contiguous = (
+                abs(float(previous["master_end_seconds"]) - float(segment["master_start_seconds"])) <= 0.01
+                and abs(float(previous["source_end_seconds"]) - float(segment["source_start_seconds"])) <= 0.05
+            )
+            if same_camera and contiguous:
+                previous["master_end_seconds"] = float(segment["master_end_seconds"])
+                previous["source_end_seconds"] = float(segment["source_end_seconds"])
+                continue
+            merged.append(json.loads(json.dumps(segment)))
+        return merged
+
+    def _sanitize_cut_plan_tail(
+        cut_plan_payload: dict[str, Any],
+        *,
+        asset_duration_cache: dict[str, float],
+    ) -> dict[str, Any] | None:
+        original_segments = cut_plan_payload.get("video_segments")
+        if not isinstance(original_segments, list) or not original_segments:
+            return None
+
+        first_invalid_index: int | None = None
+        for index, segment in enumerate(original_segments):
+            if not isinstance(segment, dict):
+                return None
+            asset_path = str(segment.get("asset_path") or "")
+            duration_seconds = asset_duration_cache.get(asset_path)
+            if (
+                duration_seconds is None
+                or (
+                    _segment_valid_for_duration(segment, duration_seconds)
+                    and _segment_valid_for_coverage(segment)
+                )
+            ):
+                continue
+            first_invalid_index = index
+            break
+
+        if first_invalid_index is None:
+            return cut_plan_payload
+
+        target_end_seconds = float(cut_plan_payload.get("timeline", {}).get("master_span_end_seconds") or 0.0)
+        if coverage_windows_by_path:
+            target_end_seconds = min(
+                target_end_seconds,
+                max(float(coverage.overlap_end_seconds) for coverage in coverage_windows_by_path.values()),
+            )
+
+        boundaries: set[float] = {0.0}
+        for original_segment in original_segments:
+            if not isinstance(original_segment, dict):
+                return None
+            segment_start_seconds = float(original_segment.get("master_start_seconds") or 0.0)
+            segment_end_seconds = float(original_segment.get("master_end_seconds") or 0.0)
+            if segment_end_seconds <= 0.0 or segment_start_seconds >= target_end_seconds - 0.01:
+                continue
+            boundaries.add(round(max(0.0, segment_start_seconds), 6))
+            boundaries.add(round(min(target_end_seconds, segment_end_seconds), 6))
+
+        for coverage in coverage_windows_by_path.values():
+            overlap_start_seconds = float(coverage.overlap_start_seconds)
+            overlap_end_seconds = float(coverage.overlap_end_seconds)
+            if 0.01 < overlap_start_seconds < target_end_seconds - 0.01:
+                boundaries.add(round(overlap_start_seconds, 6))
+            if 0.01 < overlap_end_seconds < target_end_seconds - 0.01:
+                boundaries.add(round(overlap_end_seconds, 6))
+
+        sorted_boundaries = sorted(boundaries)
+        rebuilt_segments_raw: list[dict[str, Any]] = []
+        original_index = 0
+        original_count = len(original_segments)
+        for interval_start_seconds, interval_end_seconds in zip(sorted_boundaries, sorted_boundaries[1:]):
+            if interval_end_seconds - interval_start_seconds <= 0.01:
+                continue
+            while original_index < original_count:
+                candidate_segment = original_segments[original_index]
+                if not isinstance(candidate_segment, dict):
+                    return None
+                candidate_end_seconds = float(candidate_segment.get("master_end_seconds") or 0.0)
+                if candidate_end_seconds > interval_start_seconds + 0.0001:
+                    break
+                original_index += 1
+            if original_index >= original_count:
+                break
+
+            base_segment = original_segments[original_index]
+            if not isinstance(base_segment, dict):
+                return None
+
+            interval_segment = _subsegment_from_original(base_segment, interval_start_seconds, interval_end_seconds)
+            asset_path = str(interval_segment.get("asset_path") or "")
+            duration_seconds = asset_duration_cache.get(asset_path)
+            keep_original = (
+                duration_seconds is not None
+                and _segment_valid_for_duration(interval_segment, duration_seconds)
+                and _segment_valid_for_coverage(interval_segment)
+            )
+            if keep_original:
+                rebuilt_segments_raw.append(interval_segment)
+                continue
+
+            salvage_segment = _build_salvage_segment(interval_start_seconds, interval_end_seconds)
+            if salvage_segment is None:
+                break
+            rebuilt_segments_raw.append(salvage_segment)
+
+        rebuilt_video_segments = _rebuild_video_timing(_merge_adjacent_segments(rebuilt_segments_raw))
+        if not rebuilt_video_segments:
+            return None
+
+        sanitized = json.loads(json.dumps(cut_plan_payload))
+        sanitized["video_segments"] = rebuilt_video_segments
+        sanitized["audio_segments"] = [
+            {
+                "id": f"audio_{index:04d}",
+                "type": "master_audio",
+                "source_path": master_path,
+                "master_start_seconds": segment["master_start_seconds"],
+                "master_end_seconds": segment["master_end_seconds"],
+                "output_start_seconds": segment["output_start_seconds"],
+                "output_end_seconds": segment["output_end_seconds"],
+                "duration_seconds": segment["duration_seconds"],
+                "source_start_seconds": segment["master_start_seconds"],
+                "source_end_seconds": segment["master_end_seconds"],
+            }
+            for index, segment in enumerate(rebuilt_video_segments, start=1)
+        ]
+        sanitized["timeline"] = {
+            **dict(sanitized.get("timeline") or {}),
+            "master_span_start_seconds": float(rebuilt_video_segments[0]["master_start_seconds"]),
+            "master_span_end_seconds": float(rebuilt_video_segments[-1]["master_end_seconds"]),
+            "output_duration_seconds": float(rebuilt_video_segments[-1]["output_end_seconds"]),
+            "segment_count": len(rebuilt_video_segments),
+            "kept_intervals": [
+                {
+                    "master_start_seconds": segment["master_start_seconds"],
+                    "master_end_seconds": segment["master_end_seconds"],
+                    "asset_id": segment["asset_id"],
+                }
+                for segment in rebuilt_video_segments
+            ],
+        }
+        summary = dict(sanitized.get("summary") or {})
+        summary["selected_assets"] = sorted({segment["asset_id"] for segment in rebuilt_video_segments})
+        summary["video_segments"] = len(rebuilt_video_segments)
+        summary["output_duration_seconds"] = float(rebuilt_video_segments[-1]["output_end_seconds"])
+        summary["tail_trimmed_for_coverage"] = True
+        summary["reuse_salvaged_tail_seconds"] = max(
+            0.0,
+            float(cut_plan_payload.get("timeline", {}).get("master_span_end_seconds") or 0.0)
+            - float(rebuilt_video_segments[-1]["master_end_seconds"]),
+        )
+        sanitized["summary"] = summary
+        sanitized["_vazer_reuse_mutated"] = True
+        return sanitized
+
     duration_cache: dict[str, float] = {}
     for segment in video_segments:
         if not isinstance(segment, dict):
@@ -310,20 +611,17 @@ def _load_reusable_cut_plan(
                 return None
             duration_cache[asset_path] = duration_seconds
 
-        try:
-            source_start_seconds = float(segment.get("source_start_seconds") or 0.0)
-            source_end_seconds = float(segment.get("source_end_seconds") or 0.0)
-        except (TypeError, ValueError):
-            return None
-
-        if source_start_seconds < -0.01:
-            return None
-        if source_end_seconds - source_start_seconds <= 0.01:
-            return None
-        if source_start_seconds >= duration_seconds - 0.01:
-            return None
-        if source_end_seconds > duration_seconds + 0.25:
-            return None
+    sanitized_payload = _sanitize_cut_plan_tail(payload, asset_duration_cache=duration_cache)
+    if sanitized_payload is None:
+        return None
+    if sanitized_payload.get("_vazer_reuse_mutated"):
+        sanitized_to_write = dict(sanitized_payload)
+        sanitized_to_write.pop("_vazer_reuse_mutated", None)
+        write_cut_plan(sanitized_to_write, str(path))
+        payload = dict(sanitized_to_write)
+        payload["_vazer_reuse_mutated"] = True
+    else:
+        payload = sanitized_payload
 
     if source_sync_map_path is not None:
         source_sync_map = payload.get("source_sync_map") or {}
@@ -2527,14 +2825,19 @@ class UIState:
                 str(master_path),
                 camera_path_list,
                 planning_stage="draft",
+                sync_map=final_sync_map,
                 source_sync_map_path=str(sync_map_path),
                 source_analysis_map_path=str(analysis_map_path),
                 source_transcript_path=str(transcript_path),
             )
+            reusable_ai_cut_plan_mutated = False
+            if reusable_ai_cut_plan is not None:
+                reusable_ai_cut_plan_mutated = bool(reusable_ai_cut_plan.pop("_vazer_reuse_mutated", False))
             reusable_validation_report = None
             reusable_repaired_cut_plan = None
             reusable_render_ready_cut_plan = None
-            if reusable_ai_cut_plan is not None:
+            reusable_repaired_cut_plan_mutated = False
+            if reusable_ai_cut_plan is not None and not reusable_ai_cut_plan_mutated:
                 reusable_validation_report = _load_reusable_cut_validation(
                     validation_path,
                     source_cut_plan_path=str(ai_cut_plan_path),
@@ -2542,36 +2845,67 @@ class UIState:
                     source_analysis_map_path=str(analysis_map_path),
                     source_transcript_path=str(transcript_path),
                 )
-            if reusable_ai_cut_plan is not None and reusable_validation_report is not None:
-                reusable_repaired_cut_plan = _load_reusable_cut_plan(
-                    repaired_cut_plan_path,
-                    str(master_path),
-                    camera_path_list,
-                    planning_stage="repaired",
-                    source_sync_map_path=str(sync_map_path),
-                    source_analysis_map_path=str(analysis_map_path),
-                    source_transcript_path=str(transcript_path),
-                )
+            reusable_repaired_cut_plan = _load_reusable_cut_plan(
+                repaired_cut_plan_path,
+                str(master_path),
+                camera_path_list,
+                planning_stage="repaired",
+                sync_map=final_sync_map,
+                source_sync_map_path=str(sync_map_path),
+                source_analysis_map_path=str(analysis_map_path),
+                source_transcript_path=str(transcript_path),
+            )
             if reusable_repaired_cut_plan is not None:
+                reusable_repaired_cut_plan_mutated = bool(
+                    reusable_repaired_cut_plan.pop("_vazer_reuse_mutated", False)
+                )
+            if reusable_repaired_cut_plan is not None and not reusable_repaired_cut_plan_mutated:
                 reusable_render_ready_cut_plan = _load_reusable_cut_plan(
                     render_ready_cut_plan_path,
                     str(master_path),
                     camera_path_list,
                     planning_stage="repaired",
+                    sync_map=final_sync_map,
                     source_sync_map_path=str(sync_map_path),
                     source_analysis_map_path=str(analysis_map_path),
                     source_transcript_path=str(transcript_path),
                 )
+                if reusable_render_ready_cut_plan is not None:
+                    reusable_render_ready_cut_plan.pop("_vazer_reuse_mutated", False)
 
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
-            if reusable_ai_cut_plan is not None:
+            if reusable_repaired_cut_plan is not None:
+                ai_cut_plan = reusable_ai_cut_plan or reusable_repaired_cut_plan
+                self._update_job(
+                    job_id,
+                    stage="planning",
+                    stage_label="AI Schnitt",
+                    message=(
+                        "Using existing repaired cut plan. Skipping AI draft rebuild."
+                        if not reusable_repaired_cut_plan_mutated
+                        else "Using existing repaired cut plan after trimming stale tail segments to valid camera coverage."
+                    ),
+                    progress_percent=82.0,
+                    cut_progress={
+                        "subphase": "draft",
+                        "label": "Reuse",
+                        "current": 1,
+                        "total": 1,
+                        "percent": 100.0,
+                    },
+                )
+            elif reusable_ai_cut_plan is not None:
                 ai_cut_plan = reusable_ai_cut_plan
                 self._update_job(
                     job_id,
                     stage="planning",
                     stage_label="AI Schnitt",
-                    message="Using existing AI cut plan.",
+                    message=(
+                        "Using existing AI cut plan."
+                        if not reusable_ai_cut_plan_mutated
+                        else "Using existing AI cut plan after trimming the stale tail to valid camera coverage."
+                    ),
                     progress_percent=82.0,
                     cut_progress={
                         "subphase": "draft",
@@ -2665,7 +2999,24 @@ class UIState:
                     },
                 )
 
-            if reusable_validation_report is not None:
+            if reusable_repaired_cut_plan is not None:
+                validation_report = reusable_validation_report
+                self._update_job(
+                    job_id,
+                    stage="validate",
+                    stage_label="Cuts pruefen",
+                    message="Using existing repaired cut plan. Cut validation skipped.",
+                    progress_percent=86.0,
+                    analysis_pass="local",
+                    cut_progress={
+                        "subphase": "validate",
+                        "label": "Reuse",
+                        "current": 1,
+                        "total": 1,
+                        "percent": 100.0,
+                    },
+                )
+            elif reusable_validation_report is not None:
                 validation_report = reusable_validation_report
                 self._update_job(
                     job_id,
@@ -2727,7 +3078,11 @@ class UIState:
                     job_id,
                     stage="repair",
                     stage_label="Cuts reparieren",
-                    message="Using existing repaired cut plan.",
+                    message=(
+                        "Using existing repaired cut plan."
+                        if not reusable_repaired_cut_plan_mutated
+                        else "Using existing repaired cut plan after trimming stale tail segments."
+                    ),
                     progress_percent=89.0,
                     cut_progress={
                         "subphase": "repair",
