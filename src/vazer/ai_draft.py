@@ -311,7 +311,31 @@ def _select_asset_for_interval(
         candidates.append((overlap_seconds, -index, proposal))
 
     if not candidates:
-        return fallback_asset_id, "Fallback camera selected because AI proposals did not cover this interval."
+        fallback_coverage = coverages_by_asset.get(fallback_asset_id)
+        if (
+            fallback_coverage is not None
+            and fallback_coverage.overlap_start_seconds <= interval_start_seconds + EPSILON
+            and fallback_coverage.overlap_end_seconds >= interval_end_seconds - EPSILON
+        ):
+            return fallback_asset_id, "Fallback camera selected because AI proposals did not cover this interval."
+
+        covering_fallbacks = [
+            coverage
+            for coverage in coverages_by_asset.values()
+            if coverage.overlap_start_seconds <= interval_start_seconds + EPSILON
+            and coverage.overlap_end_seconds >= interval_end_seconds - EPSILON
+        ]
+        if covering_fallbacks:
+            best_covering = max(covering_fallbacks, key=_candidate_score)
+            return (
+                best_covering.asset_id,
+                "Best covering synced camera selected because the default fallback did not cover this interval.",
+            )
+
+        raise ValueError(
+            "No synced camera covers interval "
+            f"{interval_start_seconds:.3f}s..{interval_end_seconds:.3f}s."
+        )
 
     best = max(candidates, key=lambda item: (item[0], item[1]))
     return best[2].asset_id, best[2].reason
