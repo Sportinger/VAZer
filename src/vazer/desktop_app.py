@@ -18,10 +18,11 @@ def _slugify(value: str) -> str:
 def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> int:
     try:
         import cv2
-        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtCore import QSize, Qt, QTimer
         from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QImage, QPainter, QPainterPath, QPen, QPixmap
         from PySide6.QtWidgets import (
             QApplication,
+            QCheckBox,
             QComboBox,
             QFileDialog,
             QFrame,
@@ -37,6 +38,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             QStackedWidget,
             QVBoxLayout,
             QWidget,
+            QSizePolicy,
         )
     except ModuleNotFoundError as error:  # pragma: no cover - runtime dependency guard
         raise ValueError("PySide6 is not installed. Install project dependencies first.") from error
@@ -48,6 +50,9 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         UIState,
         should_ignore_import_file,
     )
+
+    PREVIEW_MAX_WIDTH = 1280
+    PREVIEW_MAX_HEIGHT = 720
 
     PIPELINE_PHASES = [
         {"id": "probe", "symbol": "ING", "label": "Import", "detail": "Probe"},
@@ -174,6 +179,67 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                     )
                     layout.addWidget(sub_bar)
 
+    class ScaledImageLabel(QLabel):
+        def __init__(self, text: str = "", *, fallback_size: QSize | None = None) -> None:
+            super().__init__(text)
+            self._source_pixmap: QPixmap | None = None
+            self._scaled_cache: QPixmap | None = None
+            self._scaled_cache_size = QSize()
+            self._fallback_size = fallback_size or QSize(640, 360)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        def set_source_pixmap(self, pixmap: QPixmap | None) -> None:
+            self._source_pixmap = None if pixmap is None or pixmap.isNull() else QPixmap(pixmap)
+            self._scaled_cache = None
+            self._scaled_cache_size = QSize()
+            if self._source_pixmap is None:
+                super().setPixmap(QPixmap())
+            self.updateGeometry()
+            self.update()
+
+        def clear(self) -> None:  # type: ignore[override]
+            super().clear()
+            self.set_source_pixmap(None)
+
+        def sizeHint(self) -> QSize:  # type: ignore[override]
+            return self._fallback_size
+
+        def minimumSizeHint(self) -> QSize:  # type: ignore[override]
+            return self._fallback_size
+
+        def resizeEvent(self, event) -> None:  # type: ignore[override]
+            self._scaled_cache = None
+            self._scaled_cache_size = QSize()
+            super().resizeEvent(event)
+
+        def _scaled_pixmap(self) -> QPixmap | None:
+            if self._source_pixmap is None:
+                return None
+            target_size = self.contentsRect().size()
+            if target_size.width() <= 0 or target_size.height() <= 0:
+                return None
+            if self._scaled_cache is not None and self._scaled_cache_size == target_size:
+                return self._scaled_cache
+            self._scaled_cache = self._source_pixmap.scaled(
+                target_size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._scaled_cache_size = QSize(target_size)
+            return self._scaled_cache
+
+        def paintEvent(self, event) -> None:  # type: ignore[override]
+            super().paintEvent(event)
+            scaled = self._scaled_pixmap()
+            if scaled is None:
+                return
+            target = self.contentsRect()
+            x = target.x() + max(0, (target.width() - scaled.width()) // 2)
+            y = target.y() + max(0, (target.height() - scaled.height()) // 2)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawPixmap(x, y, scaled)
+
     class PhaseBadge(QWidget):
         def __init__(self, symbol: str) -> None:
             super().__init__()
@@ -266,6 +332,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.current_preview_pixmap: QPixmap | None = None
             self.current_preview_key: str | None = None
             self.current_role_review_signature: str | None = None
+            self.staged_existing_run: dict[str, Any] | None = None
+            self.staged_existing_signature: tuple[str, ...] = ()
             self._shutdown_started = False
 
             self.setWindowTitle("VAZer")
@@ -383,7 +451,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             review_layout = QVBoxLayout(self.review_widget)
             review_layout.setContentsMargins(0, 0, 0, 0)
             review_layout.setSpacing(10)
-            self.review_cards: list[tuple[QLabel, QLabel]] = []
+            self.review_cards: list[tuple[ScaledImageLabel, QLabel]] = []
             for _ in range(3):
                 card = QFrame()
                 card.setObjectName("reviewCard")
@@ -392,7 +460,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 card_layout = QVBoxLayout(card)
                 card_layout.setContentsMargins(10, 10, 10, 10)
                 card_layout.setSpacing(8)
-                image_label = QLabel("Warte auf Mittelframe ...")
+                image_label = ScaledImageLabel("Warte auf Mittelframe ...", fallback_size=QSize(280, 150))
                 image_label.setObjectName("reviewImage")
                 image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 image_label.setMinimumHeight(150)
@@ -408,7 +476,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 review_layout.addWidget(card)
                 self.review_cards.append((image_label, caption_label))
             review_layout.addStretch(1)
-            self.preview_frame = QLabel("Kein File ausgewaehlt.")
+            self.preview_frame = ScaledImageLabel("Kein File ausgewaehlt.", fallback_size=QSize(960, 540))
             self.preview_frame.setObjectName("preview")
             self.preview_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.preview_frame.setMinimumHeight(320)
@@ -451,6 +519,10 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.output_mode_combo.addItem("Nur Premiere XML", OUTPUT_MODE_PREMIERE_ONLY)
             output_mode_column.addWidget(output_mode_label)
             output_mode_column.addWidget(self.output_mode_combo)
+            self.redo_all_checkbox = QCheckBox("Redo all")
+            self.redo_all_checkbox.setObjectName("redoAllCheckbox")
+            self.redo_all_checkbox.toggled.connect(lambda _checked: self.refresh_state())
+            output_mode_column.addWidget(self.redo_all_checkbox)
             footer_layout.addLayout(output_mode_column)
             self.abort_button = QPushButton("Abbrechen")
             self.abort_button.setObjectName("secondaryButton")
@@ -548,6 +620,24 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                   font-size: 11px;
                   font-weight: 700;
                   letter-spacing: 1px;
+                }
+                QCheckBox#redoAllCheckbox {
+                  color: #b9b2a3;
+                  font-size: 12px;
+                  font-weight: 700;
+                  spacing: 8px;
+                  padding-top: 2px;
+                }
+                QCheckBox#redoAllCheckbox::indicator {
+                  width: 14px;
+                  height: 14px;
+                  border-radius: 4px;
+                  border: 1px solid rgba(255,255,255,0.18);
+                  background: rgba(255,255,255,0.04);
+                }
+                QCheckBox#redoAllCheckbox::indicator:checked {
+                  border-color: rgba(239,157,77,0.8);
+                  background: #ef9d4d;
                 }
                 QLabel#panelTitle {
                   font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
@@ -703,7 +793,6 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
         def resizeEvent(self, event) -> None:  # type: ignore[override]
             super().resizeEvent(event)
-            self._refresh_preview_pixmap()
 
         def closeEvent(self, event) -> None:  # noqa: N802
             active_job = self._find_active_job()
@@ -770,7 +859,15 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             if not added:
                 self.status_label.setText("Diese Dateien sind bereits in der Liste.")
             else:
-                self.status_label.setText(f"{added} Datei(en) hinzugefuegt. Wenn alles passt, drueck VAZ.")
+                existing_run = self._refresh_staged_existing_run(force=True)
+                if existing_run is not None:
+                    summary = str(existing_run.get("summary") or "Vorhandene VAZer-Daten erkannt.")
+                    suffix = " Redo all ignoriert vorhandene Daten." if self.redo_all_checkbox.isChecked() else ""
+                    self.status_label.setText(
+                        f"{added} Datei(en) hinzugefuegt. {summary}.{suffix} Wenn alles passt, drueck VAZ."
+                    )
+                else:
+                    self.status_label.setText(f"{added} Datei(en) hinzugefuegt. Wenn alles passt, drueck VAZ.")
             self.refresh_file_list(preserve_selection=True)
 
         def start_vaz(self) -> None:
@@ -784,13 +881,13 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             paths = [file_info["stored_path"] for file_info in self.staged_files]
             project_name = self._suggest_project_name(paths)
             output_mode = str(self.output_mode_combo.currentData() or OUTPUT_MODE_RENDER_AND_PREMIERE)
-            reset_existing = False
+            reset_existing = self.redo_all_checkbox.isChecked()
             try:
-                existing_run = self.app_state.inspect_existing_source_run(paths)
+                existing_run = self._refresh_staged_existing_run(force=True)
             except Exception as error:
                 QMessageBox.critical(self, "VAZer", str(error))
                 return
-            if existing_run is not None:
+            if existing_run is not None and not reset_existing:
                 decision = self._ask_existing_run_decision(existing_run)
                 if decision == "cancel":
                     self.status_label.setText("VAZ-Start abgebrochen.")
@@ -810,6 +907,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.active_project_id = result["project_id"]
             self.active_job_id = result["job_id"]
             self.staged_files = []
+            self.staged_existing_run = None
+            self.staged_existing_signature = ()
             self.output_mode_combo.setEnabled(False)
             self.status_label.setText(f"VAZ gestartet: {project_name} | {self._output_mode_label(output_mode)}")
             self.refresh_state()
@@ -909,9 +1008,17 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             active_job = self._find_active_job()
             role_review_payload = self._build_role_review_payload(active_project, active_job)
             self.output_mode_combo.setEnabled(not self._active_job_is_busy())
-            self._update_phase_strip(active_job)
+            self.redo_all_checkbox.setEnabled(not self._active_job_is_busy())
+            staged_existing_run = None if active_job is not None else self._refresh_staged_existing_run()
+            self._update_phase_strip(
+                active_job,
+                existing_run=staged_existing_run,
+                has_staged_files=bool(self.staged_files),
+            )
 
             if active_project is None and active_job is None and not self.staged_files:
+                self.staged_existing_run = None
+                self.staged_existing_signature = ()
                 self.file_meta.setText("Droppe Dateien oder einen Ordner. Die Liste sammelt alles fuer genau einen Lauf.")
                 self.progress_bar.setValue(0)
                 self.start_button.setEnabled(False)
@@ -935,10 +1042,14 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                     self.file_meta.setText(f"{file_count} Datei(en) im aktuellen Lauf. Output: {output_mode_label}.")
             else:
                 self.refresh_file_list(preserve_selection=True)
-                self.file_meta.setText(
+                meta_text = (
                     f"{len(self.staged_files)} Datei(en) vorgemerkt fuer den naechsten Lauf. "
                     f"Output: {self._output_mode_label(self.output_mode_combo.currentData())}."
                 )
+                staged_summary = self._staged_existing_summary(staged_existing_run)
+                if staged_summary:
+                    meta_text = f"{meta_text} {staged_summary}"
+                self.file_meta.setText(meta_text)
 
             if active_job is None:
                 self.progress_bar.setValue(0)
@@ -947,6 +1058,9 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 self.continue_button.hide()
                 self.abort_button.hide()
                 self.pause_button.hide()
+                staged_summary = self._staged_existing_summary(staged_existing_run)
+                if staged_summary:
+                    self.status_label.setText(staged_summary)
                 self._show_selected_file_preview()
                 return
 
@@ -1020,7 +1134,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             file_info = self._selected_file_info()
             if file_info is None:
                 self.preview_frame.setText("Kein File ausgewaehlt.")
-                self.preview_frame.setPixmap(QPixmap())
+                self.preview_frame.set_source_pixmap(None)
                 self.preview_meta.setText("Waehle links eine Datei aus.")
                 self.current_preview_pixmap = None
                 self.current_preview_key = None
@@ -1029,15 +1143,21 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.preview_meta.setText(self._build_preview_meta(file_info))
             preview_path = self._build_preview_image(file_info["stored_path"])
             if preview_path is None:
-                self.preview_frame.setPixmap(QPixmap())
+                self.preview_frame.set_source_pixmap(None)
                 self.preview_frame.setText("Keine Video-Vorschau fuer diese Datei.")
                 self.current_preview_pixmap = None
                 self.current_preview_key = None
                 return
 
-            pixmap = QPixmap(str(preview_path))
+            preview_key = str(preview_path)
+            if self.current_preview_key == preview_key and self.current_preview_pixmap is not None:
+                self.preview_frame.setText("")
+                self.preview_frame.set_source_pixmap(self.current_preview_pixmap)
+                return
+
+            pixmap = QPixmap(preview_key)
             if pixmap.isNull():
-                self.preview_frame.setPixmap(QPixmap())
+                self.preview_frame.set_source_pixmap(None)
                 self.preview_frame.setText("Preview konnte nicht geladen werden.")
                 self.current_preview_pixmap = None
                 self.current_preview_key = None
@@ -1045,8 +1165,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
             self.preview_frame.setText("")
             self.current_preview_pixmap = pixmap
-            self.current_preview_key = file_info["stored_path"]
-            self._refresh_preview_pixmap()
+            self.current_preview_key = preview_key
+            self.preview_frame.set_source_pixmap(pixmap)
 
         def _show_role_review(self, payload: dict[str, Any]) -> None:
             signature = json.dumps(
@@ -1075,7 +1195,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             cards = payload.get("cards") or []
             for index, (image_label, caption_label) in enumerate(self.review_cards):
                 if index >= len(cards):
-                    image_label.setPixmap(QPixmap())
+                    image_label.set_source_pixmap(None)
                     image_label.setText("")
                     caption_label.setText("")
                     continue
@@ -1084,21 +1204,13 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 if image_path and Path(image_path).exists():
                     pixmap = QPixmap(str(image_path))
                     if pixmap.isNull():
-                        image_label.setPixmap(QPixmap())
+                        image_label.set_source_pixmap(None)
                         image_label.setText("Frame konnte nicht geladen werden.")
                     else:
-                        target_width = max(280, image_label.width() - 20)
-                        target_height = max(120, image_label.height() - 20)
-                        scaled = pixmap.scaled(
-                            target_width,
-                            target_height,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                        image_label.setPixmap(scaled)
                         image_label.setText("")
+                        image_label.set_source_pixmap(pixmap)
                 else:
-                    image_label.setPixmap(QPixmap())
+                    image_label.set_source_pixmap(None)
                     image_label.setText("Warte auf Mittelframe ...")
 
                 role = card.get("role")
@@ -1115,16 +1227,6 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                     )
                 else:
                     caption_label.setText(display_name)
-
-        def _refresh_preview_pixmap(self) -> None:
-            if self.current_preview_pixmap is None:
-                return
-            scaled = self.current_preview_pixmap.scaled(
-                self.preview_frame.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self.preview_frame.setPixmap(scaled)
 
         def _build_preview_meta(self, file_info: dict[str, Any]) -> str:
             media_info = self._probe_cached(file_info["stored_path"])
@@ -1173,6 +1275,16 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 ok, frame = capture.read()
                 if not ok or frame is None:
                     return None
+                frame_height, frame_width = frame.shape[:2]
+                scale = min(
+                    1.0,
+                    PREVIEW_MAX_WIDTH / max(1, frame_width),
+                    PREVIEW_MAX_HEIGHT / max(1, frame_height),
+                )
+                if scale < 1.0:
+                    target_width = max(2, int(round(frame_width * scale)))
+                    target_height = max(2, int(round(frame_height * scale)))
+                    frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
                 preview_path.parent.mkdir(parents=True, exist_ok=True)
                 if not cv2.imwrite(str(preview_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
                     return None
@@ -1242,9 +1354,67 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return "Nur Premiere XML"
             return "MP4 + Premiere XML"
 
-        def _update_phase_strip(self, active_job: dict[str, Any] | None) -> None:
-            phase_states = self._build_phase_states(active_job)
-            phase_fill_percents = self._build_phase_fill_percents(active_job)
+        def _staged_paths_signature(self) -> tuple[str, ...]:
+            return tuple(sorted(str(file_info.get("stored_path") or "") for file_info in self.staged_files))
+
+        def _refresh_staged_existing_run(self, *, force: bool = False) -> dict[str, Any] | None:
+            if not self.staged_files:
+                self.staged_existing_run = None
+                self.staged_existing_signature = ()
+                return None
+
+            signature = self._staged_paths_signature()
+            if not force and signature == self.staged_existing_signature:
+                return self.staged_existing_run
+
+            self.staged_existing_signature = signature
+            self.staged_existing_run = self.app_state.inspect_existing_source_run(list(signature))
+            return self.staged_existing_run
+
+        def _staged_existing_summary(self, existing_run: dict[str, Any] | None) -> str | None:
+            if existing_run is None:
+                return None
+            artifact_flags = existing_run.get("artifact_flags") or {}
+            found: list[str] = []
+            if artifact_flags.get("camera_roles"):
+                found.append("Rollen")
+            if artifact_flags.get("sync_complete"):
+                found.append("Sync")
+            elif artifact_flags.get("sync_partial"):
+                found.append("Sync teilweise")
+            if artifact_flags.get("transcript"):
+                found.append("Transcript")
+            if artifact_flags.get("analysis"):
+                found.append("Analyse")
+            if artifact_flags.get("repair") or artifact_flags.get("render_cut"):
+                found.append("Schnitt")
+            elif artifact_flags.get("planning") or artifact_flags.get("validation"):
+                found.append("Schnitt teilweise")
+            if artifact_flags.get("render"):
+                found.append("MP4")
+            elif artifact_flags.get("premiere"):
+                found.append("Premiere XML")
+
+            parts = [str(existing_run.get("summary") or "").strip()]
+            if found:
+                parts.append("Gefunden: " + ", ".join(found))
+            if self.redo_all_checkbox.isChecked():
+                parts.append("Redo all aktiv.")
+            return " | ".join(part for part in parts if part)
+
+        def _update_phase_strip(
+            self,
+            active_job: dict[str, Any] | None,
+            *,
+            existing_run: dict[str, Any] | None = None,
+            has_staged_files: bool = False,
+        ) -> None:
+            phase_states = self._build_phase_states(active_job, existing_run=existing_run, has_staged_files=has_staged_files)
+            phase_fill_percents = self._build_phase_fill_percents(
+                active_job,
+                existing_run=existing_run,
+                has_staged_files=has_staged_files,
+            )
             for widget_info in self.phase_widgets:
                 state = phase_states.get(widget_info["id"], "pending")
                 self._set_phase_state(widget_info["node"], state)
@@ -1274,9 +1444,46 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                     connector_state = "active" if right_state == "active" else "done"
                 self._set_phase_state(connector, connector_state)
 
-        def _build_phase_states(self, active_job: dict[str, Any] | None) -> dict[str, str]:
+        def _build_phase_states(
+            self,
+            active_job: dict[str, Any] | None,
+            *,
+            existing_run: dict[str, Any] | None = None,
+            has_staged_files: bool = False,
+        ) -> dict[str, str]:
             states = {phase["id"]: "pending" for phase in PIPELINE_PHASES}
             if active_job is None:
+                if has_staged_files:
+                    states["probe"] = "done"
+                if existing_run is not None:
+                    artifact_flags = existing_run.get("artifact_flags") or {}
+                    if has_staged_files or artifact_flags.get("project_state") or any(bool(value) for value in artifact_flags.values()):
+                        states["probe"] = "done"
+                        states["classify"] = "done"
+                    if artifact_flags.get("camera_roles"):
+                        states["roles"] = "done"
+                    elif states["classify"] == "done":
+                        states["roles"] = "pending"
+                    if artifact_flags.get("sync_complete"):
+                        states["sync"] = "done"
+                    elif artifact_flags.get("sync_partial"):
+                        states["sync"] = "active"
+                    if artifact_flags.get("transcript"):
+                        states["transcript"] = "done"
+                    if artifact_flags.get("analysis"):
+                        states["analysis"] = "done"
+                    if artifact_flags.get("repair") or artifact_flags.get("render_cut"):
+                        states["cut"] = "done"
+                    elif artifact_flags.get("planning") or artifact_flags.get("validation"):
+                        states["cut"] = "active"
+                    output_mode = str(existing_run.get("output_mode") or "")
+                    export_finished = artifact_flags.get("render") or (
+                        output_mode == OUTPUT_MODE_PREMIERE_ONLY and artifact_flags.get("premiere")
+                    )
+                    if export_finished:
+                        states["render"] = "done"
+                    elif artifact_flags.get("premiere") or artifact_flags.get("render"):
+                        states["render"] = "active"
                 return states
 
             status = str(active_job.get("status") or "")
@@ -1318,9 +1525,43 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                         states[phase["id"]] = "active"
             return states
 
-        def _build_phase_fill_percents(self, active_job: dict[str, Any] | None) -> dict[str, float]:
+        def _build_phase_fill_percents(
+            self,
+            active_job: dict[str, Any] | None,
+            *,
+            existing_run: dict[str, Any] | None = None,
+            has_staged_files: bool = False,
+        ) -> dict[str, float]:
             fills = {phase["id"]: 0.0 for phase in PIPELINE_PHASES}
             if active_job is None:
+                if has_staged_files:
+                    fills["probe"] = 100.0
+                if existing_run is not None:
+                    artifact_flags = existing_run.get("artifact_flags") or {}
+                    if has_staged_files or artifact_flags.get("project_state") or any(bool(value) for value in artifact_flags.values()):
+                        fills["probe"] = 100.0
+                        fills["classify"] = 100.0
+                    if artifact_flags.get("camera_roles"):
+                        fills["roles"] = 100.0
+                    if artifact_flags.get("sync_complete"):
+                        fills["sync"] = 100.0
+                    elif artifact_flags.get("sync_partial"):
+                        fills["sync"] = 55.0
+                    if artifact_flags.get("transcript"):
+                        fills["transcript"] = 100.0
+                    if artifact_flags.get("analysis"):
+                        fills["analysis"] = 100.0
+                    if artifact_flags.get("render_cut") or artifact_flags.get("repair"):
+                        fills["cut"] = 100.0
+                    elif artifact_flags.get("validation"):
+                        fills["cut"] = 80.0
+                    elif artifact_flags.get("planning"):
+                        fills["cut"] = 55.0
+                    output_mode = str(existing_run.get("output_mode") or "")
+                    if artifact_flags.get("render"):
+                        fills["render"] = 100.0
+                    elif artifact_flags.get("premiere"):
+                        fills["render"] = 100.0 if output_mode == OUTPUT_MODE_PREMIERE_ONLY else 60.0
                 return fills
 
             status = str(active_job.get("status") or "")

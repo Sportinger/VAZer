@@ -261,6 +261,97 @@ def _load_reusable_analysis_map(path: Path, master_path: str, camera_paths: list
     return payload
 
 
+def _load_reusable_cut_plan(
+    path: Path,
+    master_path: str,
+    camera_paths: list[str],
+    *,
+    planning_stage: str | None = None,
+    source_sync_map_path: str | None = None,
+    source_analysis_map_path: str | None = None,
+    source_transcript_path: str | None = None,
+) -> dict[str, Any] | None:
+    payload = _load_json_if_exists(path)
+    if payload is None or payload.get("schema_version") != "vazer.cut_plan.v1":
+        return None
+
+    if planning_stage is not None and str(payload.get("planning_stage") or "").strip().lower() != planning_stage:
+        return None
+
+    master_audio = payload.get("master_audio") or {}
+    if not isinstance(master_audio, dict) or not _same_media_path(master_audio.get("path"), master_path):
+        return None
+
+    video_segments = payload.get("video_segments")
+    if not isinstance(video_segments, list) or not video_segments:
+        return None
+
+    camera_path_set = set(camera_paths)
+    referenced_paths = {
+        str(segment.get("asset_path") or "")
+        for segment in video_segments
+        if isinstance(segment, dict)
+    }
+    if not referenced_paths or not referenced_paths.issubset(camera_path_set):
+        return None
+
+    if source_sync_map_path is not None:
+        source_sync_map = payload.get("source_sync_map") or {}
+        if not isinstance(source_sync_map, dict) or not _same_media_path(source_sync_map.get("path"), source_sync_map_path):
+            return None
+
+    if source_analysis_map_path is not None:
+        source_analysis_map = payload.get("source_analysis_map") or {}
+        if not isinstance(source_analysis_map, dict) or not _same_media_path(
+            source_analysis_map.get("path"),
+            source_analysis_map_path,
+        ):
+            return None
+
+    if source_transcript_path is not None:
+        source_transcript = payload.get("source_transcript") or {}
+        if not isinstance(source_transcript, dict) or not _same_media_path(
+            source_transcript.get("path"),
+            source_transcript_path,
+        ):
+            return None
+
+    return payload
+
+
+def _load_reusable_cut_validation(
+    path: Path,
+    *,
+    source_cut_plan_path: str | None = None,
+    source_sync_map_path: str | None = None,
+    source_analysis_map_path: str | None = None,
+    source_transcript_path: str | None = None,
+) -> dict[str, Any] | None:
+    payload = _load_json_if_exists(path)
+    if payload is None or payload.get("schema_version") != "vazer.cut_validation.v1":
+        return None
+
+    expected_sources = (
+        ("source_cut_plan", source_cut_plan_path),
+        ("source_sync_map", source_sync_map_path),
+        ("source_analysis_map", source_analysis_map_path),
+        ("source_transcript", source_transcript_path),
+    )
+    for source_key, expected_path in expected_sources:
+        if expected_path is None:
+            continue
+        source_payload = payload.get(source_key) or {}
+        if not isinstance(source_payload, dict) or not _same_media_path(source_payload.get("path"), expected_path):
+            return None
+
+    summary = payload.get("summary")
+    cuts = payload.get("cuts")
+    if not isinstance(summary, dict) or not isinstance(cuts, list):
+        return None
+
+    return payload
+
+
 def _load_reusable_sync_map(
     path: Path,
     master_path: str,
@@ -812,14 +903,18 @@ class UIState:
         latest_job = state_payload.get("latest_job") if isinstance(state_payload, dict) else None
         latest_status = str((latest_job or {}).get("status") or "").strip().lower()
         latest_stage = str((latest_job or {}).get("stage_label") or (latest_job or {}).get("stage") or "").strip()
+        saved_output_mode = state_payload.get("output_mode") if isinstance(state_payload, dict) else None
         artifact_flags = {
+            "project_state": state_path.exists(),
             "camera_roles": (artifacts_dir / "vazer.camera_roles.json").exists(),
             "sync_partial": (artifacts_dir / "vazer.sync_map.partial.json").exists(),
             "sync_complete": (artifacts_dir / "vazer.sync_map.json").exists(),
             "transcript": any(artifacts_dir.glob("*.transcript.json")),
             "analysis": (artifacts_dir / "vazer.analysis_map.json").exists(),
             "planning": (artifacts_dir / "vazer.cut_plan.ai.json").exists(),
+            "validation": (artifacts_dir / "vazer.cut_validation.json").exists(),
             "repair": (artifacts_dir / "vazer.cut_plan.repaired.json").exists(),
+            "render_cut": (artifacts_dir / "vazer.cut_plan.repaired.fhd.json").exists(),
             "premiere_xml": any(output_dir.glob("*.premiere.xml")),
             "premiere_project": any(output_dir.glob("*.prproj")),
             "render": any(output_dir.glob("*.mp4")),
@@ -855,6 +950,7 @@ class UIState:
             "summary": summary,
             "latest_status": latest_status or None,
             "latest_stage": latest_stage or None,
+            "output_mode": saved_output_mode,
             "artifact_flags": artifact_flags,
             "legacy_count": len(legacy_paths),
         }
@@ -2389,56 +2485,100 @@ class UIState:
                 if isinstance(runtime, dict):
                     runtime["executor"] = None
 
+            visual_packet_path = artifact_paths["visual_packet_path"]
+            ai_cut_plan_path = artifact_paths["cut_plan_ai_path"]
+            validation_path = artifact_paths["cut_validation_path"]
+            repaired_cut_plan_path = artifact_paths["cut_plan_repaired_path"]
+            render_ready_cut_plan_path = artifact_paths["cut_plan_render_path"]
+            planning_root = artifact_paths["planning_root"]
+
+            reusable_ai_cut_plan = _load_reusable_cut_plan(
+                ai_cut_plan_path,
+                str(master_path),
+                camera_path_list,
+                planning_stage="draft",
+                source_sync_map_path=str(sync_map_path),
+                source_analysis_map_path=str(analysis_map_path),
+                source_transcript_path=str(transcript_path),
+            )
+            reusable_validation_report = _load_reusable_cut_validation(
+                validation_path,
+                source_cut_plan_path=str(ai_cut_plan_path),
+                source_sync_map_path=str(sync_map_path),
+                source_analysis_map_path=str(analysis_map_path),
+                source_transcript_path=str(transcript_path),
+            )
+            reusable_repaired_cut_plan = _load_reusable_cut_plan(
+                repaired_cut_plan_path,
+                str(master_path),
+                camera_path_list,
+                planning_stage="repaired",
+                source_sync_map_path=str(sync_map_path),
+                source_analysis_map_path=str(analysis_map_path),
+                source_transcript_path=str(transcript_path),
+            )
+            reusable_render_ready_cut_plan = _load_reusable_cut_plan(
+                render_ready_cut_plan_path,
+                str(master_path),
+                camera_path_list,
+                planning_stage="repaired",
+                source_sync_map_path=str(sync_map_path),
+                source_analysis_map_path=str(analysis_map_path),
+                source_transcript_path=str(transcript_path),
+            )
+
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
-            self._update_job(
-                job_id,
-                stage="planning",
-                stage_label="AI Schnitt",
-                message="Building chunked AI draft for the full theater recording.",
-                progress_percent=74.0,
-            )
-            planning_root = artifact_paths["planning_root"]
-            draft_bundle = build_chunked_ai_draft_bundle(
-                final_sync_map,
-                source_sync_map_path=str(sync_map_path),
-                analysis_map=analysis_map,
-                source_analysis_path=str(analysis_map_path),
-                transcript_artifact=transcript_artifact,
-                source_transcript_path=str(transcript_path),
-                role_overrides=role_overrides,
-                output_dir=str(planning_root),
-                options=TheaterPipelineOptions(),
-            )
-            visual_packet_path = artifact_paths["visual_packet_path"]
-            write_visual_packet(draft_bundle["visual_packet"], str(visual_packet_path))
-            for chunk_index, chunk_plan in enumerate(draft_bundle["chunk_plans"], start=1):
-                chunk_path = planning_root / "chunks" / f"chunk_{chunk_index:04d}.cut_plan.ai.json"
-                write_cut_plan(chunk_plan, str(chunk_path))
-            ai_cut_plan = draft_bundle["combined_cut_plan"]
-            ai_cut_plan_path = artifact_paths["cut_plan_ai_path"]
-            write_cut_plan(ai_cut_plan, str(ai_cut_plan_path))
+            if reusable_ai_cut_plan is not None:
+                ai_cut_plan = reusable_ai_cut_plan
+                self._update_job(
+                    job_id,
+                    stage="planning",
+                    stage_label="AI Schnitt",
+                    message="Using existing AI cut plan.",
+                    progress_percent=82.0,
+                )
+            else:
+                self._update_job(
+                    job_id,
+                    stage="planning",
+                    stage_label="AI Schnitt",
+                    message="Building chunked AI draft for the full theater recording.",
+                    progress_percent=74.0,
+                )
+                draft_bundle = build_chunked_ai_draft_bundle(
+                    final_sync_map,
+                    source_sync_map_path=str(sync_map_path),
+                    analysis_map=analysis_map,
+                    source_analysis_path=str(analysis_map_path),
+                    transcript_artifact=transcript_artifact,
+                    source_transcript_path=str(transcript_path),
+                    role_overrides=role_overrides,
+                    output_dir=str(planning_root),
+                    options=TheaterPipelineOptions(),
+                )
+                write_visual_packet(draft_bundle["visual_packet"], str(visual_packet_path))
+                for chunk_index, chunk_plan in enumerate(draft_bundle["chunk_plans"], start=1):
+                    chunk_path = planning_root / "chunks" / f"chunk_{chunk_index:04d}.cut_plan.ai.json"
+                    write_cut_plan(chunk_plan, str(chunk_path))
+                ai_cut_plan = draft_bundle["combined_cut_plan"]
+                write_cut_plan(ai_cut_plan, str(ai_cut_plan_path))
             self._update_project(
                 project_id,
                 artifacts={
                     **self._projects[project_id]["artifacts"],
-                    "visual_packet_path": str(visual_packet_path),
                     "cut_plan_ai_path": str(ai_cut_plan_path),
+                    **(
+                        {"visual_packet_path": str(visual_packet_path)}
+                        if visual_packet_path.exists()
+                        else {}
+                    ),
                 },
             )
             self._write_project_manifest(project_id)
 
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
-            self._update_job(
-                job_id,
-                stage="validate",
-                stage_label="Cuts pruefen",
-                message="Validating proposed cut points.",
-                progress_percent=82.0,
-                analysis_pass="local",
-            )
-
             def _validation_progress(completed: int, total: int, detail: str) -> None:
                 local_progress = 100.0 * completed / max(1, total)
                 self._update_job(
@@ -2450,51 +2590,92 @@ class UIState:
                     analysis_pass="local",
                 )
 
-            validation_report = build_cut_validation_report(
-                ai_cut_plan,
-                sync_map=final_sync_map,
-                source_cut_plan_path=str(ai_cut_plan_path),
-                source_sync_map_path=str(sync_map_path),
-                analysis_map=analysis_map,
-                source_analysis_path=str(analysis_map_path),
-                transcript_artifact=transcript_artifact,
-                source_transcript_path=str(transcript_path),
-                options=CutValidationOptions(),
-                on_progress=_validation_progress,
-            )
-            validation_path = artifact_paths["cut_validation_path"]
-            write_cut_validation_report(validation_report, str(validation_path))
+            if reusable_validation_report is not None:
+                validation_report = reusable_validation_report
+                self._update_job(
+                    job_id,
+                    stage="validate",
+                    stage_label="Cuts pruefen",
+                    message="Using existing cut validation.",
+                    progress_percent=86.0,
+                    analysis_pass="local",
+                )
+            else:
+                self._update_job(
+                    job_id,
+                    stage="validate",
+                    stage_label="Cuts pruefen",
+                    message="Validating proposed cut points.",
+                    progress_percent=82.0,
+                    analysis_pass="local",
+                )
+                validation_report = build_cut_validation_report(
+                    ai_cut_plan,
+                    sync_map=final_sync_map,
+                    source_cut_plan_path=str(ai_cut_plan_path),
+                    source_sync_map_path=str(sync_map_path),
+                    analysis_map=analysis_map,
+                    source_analysis_path=str(analysis_map_path),
+                    transcript_artifact=transcript_artifact,
+                    source_transcript_path=str(transcript_path),
+                    options=CutValidationOptions(),
+                    on_progress=_validation_progress,
+                )
+                write_cut_validation_report(validation_report, str(validation_path))
 
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
-            self._update_job(
-                job_id,
-                stage="repair",
-                stage_label="Cuts reparieren",
-                message="Applying deterministic local cut repairs.",
-                progress_percent=86.0,
-            )
-            repaired_cut_plan = repair_cut_plan(
-                ai_cut_plan,
-                validation_report,
-                sync_map=final_sync_map,
-                source_cut_plan_path=str(ai_cut_plan_path),
-                source_validation_path=str(validation_path),
-                analysis_map=analysis_map,
-                transcript_artifact=transcript_artifact,
-                options=CutValidationOptions(),
-            )
-            repaired_cut_plan_path = artifact_paths["cut_plan_repaired_path"]
-            write_cut_plan(repaired_cut_plan, str(repaired_cut_plan_path))
-            render_ready_cut_plan = apply_max_render_size(repaired_cut_plan, max_width=1920, max_height=1080)
-            render_ready_cut_plan_path = artifact_paths["cut_plan_render_path"]
-            write_cut_plan(render_ready_cut_plan, str(render_ready_cut_plan_path))
+            if reusable_repaired_cut_plan is not None:
+                repaired_cut_plan = reusable_repaired_cut_plan
+                render_ready_cut_plan = reusable_render_ready_cut_plan or apply_max_render_size(
+                    repaired_cut_plan,
+                    max_width=1920,
+                    max_height=1080,
+                )
+                if reusable_render_ready_cut_plan is None:
+                    write_cut_plan(render_ready_cut_plan, str(render_ready_cut_plan_path))
+                self._update_job(
+                    job_id,
+                    stage="repair",
+                    stage_label="Cuts reparieren",
+                    message="Using existing repaired cut plan.",
+                    progress_percent=89.0,
+                )
+            else:
+                self._update_job(
+                    job_id,
+                    stage="repair",
+                    stage_label="Cuts reparieren",
+                    message="Applying deterministic local cut repairs.",
+                    progress_percent=86.0,
+                )
+                repaired_cut_plan = repair_cut_plan(
+                    ai_cut_plan,
+                    validation_report,
+                    sync_map=final_sync_map,
+                    source_cut_plan_path=str(ai_cut_plan_path),
+                    source_validation_path=str(validation_path),
+                    analysis_map=analysis_map,
+                    transcript_artifact=transcript_artifact,
+                    options=CutValidationOptions(),
+                )
+                write_cut_plan(repaired_cut_plan, str(repaired_cut_plan_path))
+                render_ready_cut_plan = apply_max_render_size(repaired_cut_plan, max_width=1920, max_height=1080)
+                write_cut_plan(render_ready_cut_plan, str(render_ready_cut_plan_path))
             self._update_project(
                 project_id,
                 artifacts={
                     **self._projects[project_id]["artifacts"],
-                    "cut_validation_path": str(validation_path),
-                    "cut_plan_repaired_path": str(repaired_cut_plan_path),
+                    **(
+                        {"cut_validation_path": str(validation_path)}
+                        if validation_path.exists()
+                        else {}
+                    ),
+                    **(
+                        {"cut_plan_repaired_path": str(repaired_cut_plan_path)}
+                        if repaired_cut_plan_path.exists()
+                        else {}
+                    ),
                     "cut_plan_render_path": str(render_ready_cut_plan_path),
                 },
             )

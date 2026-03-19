@@ -55,7 +55,9 @@ Das heisst:
 - bei Referenzprojekten liegen die wichtigsten Artefakte jetzt standardmaessig in einem Unterordner `VAZer` im gemeinsamen Quellordner
 - darunter trennt VAZer jetzt sauber in `VAZer\artifacts`, `VAZer\output` und `VAZer\vazer.state.json`
 - vorhandene Artefakte im `VAZer`-Ordner werden nach Moeglichkeit wiederverwendet
-- vorhandene Transcript-/Analysis-/Sync-Artefakte aus aelteren Workspace-Projekten oder aus alten Root-Dateien koennen in den `VAZer`-Ordner uebernommen und dort weiterverwendet werden
+- beim Import prueft die App direkt, welche Schritte im vorhandenen `VAZer`-Ordner schon vorliegen
+- die obere Phasenleiste zeigt diese vorhandenen Schritte bereits vor dem Start farbig an
+- mit `Redo all` laesst sich die Wiederverwendung bewusst ignorieren und alles frisch neu rechnen
 - der finale Render landet bei Desktop-Referenzprojekten standardmaessig in `VAZer\output`
 - wenn die Quelldateien aus verschiedenen Ordnern kommen, faellt VAZer auf den Projekt-Workspace als Output-Ziel zurueck
 - offensichtliche Sidecar-/Hidden-Dateien wie `._*.MXF` werden beim Import ignoriert
@@ -93,6 +95,7 @@ Artefakte:
 - `VAZer\artifacts\vazer.cut_plan.ai.json`
 - `VAZer\artifacts\vazer.cut_validation.json`
 - `VAZer\artifacts\vazer.cut_plan.repaired.json`
+- `VAZer\artifacts\vazer.cut_plan.repaired.fhd.json`
 - `VAZer\output\*.premiere.xml`
 - `VAZer\output\*.mp4`
 - `VAZer\vazer.state.json` als Start-/Resume-Hinweis fuer den letzten bekannten Zustand
