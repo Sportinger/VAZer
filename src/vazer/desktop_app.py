@@ -32,6 +32,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             QProgressBar,
             QPushButton,
             QSplitter,
+            QStackedWidget,
             QVBoxLayout,
             QWidget,
         )
@@ -342,29 +343,36 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             for _ in range(3):
                 card = QFrame()
                 card.setObjectName("reviewCard")
+                card.setMinimumHeight(210)
+                card.setMaximumHeight(210)
                 card_layout = QVBoxLayout(card)
                 card_layout.setContentsMargins(10, 10, 10, 10)
                 card_layout.setSpacing(8)
                 image_label = QLabel("Warte auf Mittelframe ...")
                 image_label.setObjectName("reviewImage")
                 image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                image_label.setMinimumHeight(140)
-                image_label.setMaximumHeight(180)
+                image_label.setMinimumHeight(150)
+                image_label.setMaximumHeight(150)
                 image_label.setWordWrap(True)
                 caption_label = QLabel("")
                 caption_label.setObjectName("reviewCaption")
                 caption_label.setWordWrap(True)
+                caption_label.setMinimumHeight(28)
+                caption_label.setMaximumHeight(36)
                 card_layout.addWidget(image_label, 1)
                 card_layout.addWidget(caption_label)
-                review_layout.addWidget(card, 1)
+                review_layout.addWidget(card)
                 self.review_cards.append((image_label, caption_label))
-            self.review_widget.hide()
-            preview_layout.addWidget(self.review_widget, 1)
+            review_layout.addStretch(1)
             self.preview_frame = QLabel("Kein File ausgewaehlt.")
             self.preview_frame.setObjectName("preview")
             self.preview_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.preview_frame.setMinimumHeight(320)
-            preview_layout.addWidget(self.preview_frame, 1)
+            self.preview_stack = QStackedWidget()
+            self.preview_stack.setObjectName("previewStack")
+            self.preview_stack.addWidget(self.preview_frame)
+            self.preview_stack.addWidget(self.review_widget)
+            preview_layout.addWidget(self.preview_stack, 1)
             self.preview_meta = QLabel("Waehle links eine Datei aus. Bei Video wird ein Frame aus der Mitte gezeigt.")
             self.preview_meta.setObjectName("meta")
             self.preview_meta.setWordWrap(True)
@@ -807,8 +815,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
         def _show_selected_file_preview(self) -> None:
             self.current_role_review_signature = None
-            self.review_widget.hide()
-            self.preview_frame.show()
+            self.preview_stack.setCurrentWidget(self.preview_frame)
             file_info = self._selected_file_info()
             if file_info is None:
                 self.preview_frame.setText("Kein File ausgewaehlt.")
@@ -860,8 +867,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return
 
             self.current_role_review_signature = signature
-            self.preview_frame.hide()
-            self.review_widget.show()
+            self.preview_stack.setCurrentWidget(self.review_widget)
             summary_text = payload.get("summary_text") or "Mittelframes fuer die Rollenpruefung."
             source_text = payload.get("source_text") or ""
             self.preview_meta.setText(f"{summary_text}\n{source_text}".strip())
@@ -880,9 +886,11 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                         image_label.setPixmap(QPixmap())
                         image_label.setText("Frame konnte nicht geladen werden.")
                     else:
+                        target_width = max(280, image_label.width() - 20)
+                        target_height = max(120, image_label.height() - 20)
                         scaled = pixmap.scaled(
-                            360,
-                            190,
+                            target_width,
+                            target_height,
                             Qt.AspectRatioMode.KeepAspectRatio,
                             Qt.TransformationMode.SmoothTransformation,
                         )
