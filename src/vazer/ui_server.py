@@ -209,6 +209,58 @@ def _load_reusable_analysis_map(path: Path, master_path: str, camera_paths: list
 
     return payload
 
+
+def _load_reusable_sync_map(
+    path: Path,
+    master_path: str,
+    camera_paths: list[str],
+    *,
+    require_complete: bool,
+) -> dict[str, Any] | None:
+    payload = _load_json_if_exists(path)
+    if payload is None or payload.get("schema_version") != "vazer.sync_map.v1":
+        return None
+
+    master_payload = payload.get("master") or {}
+    if not isinstance(master_payload, dict) or not _same_media_path(master_payload.get("path"), master_path):
+        return None
+
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return None
+
+    relevant_entries_by_path: dict[str, dict[str, Any]] = {}
+    camera_path_set = set(camera_paths)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_path = str(entry.get("path") or "")
+        if entry_path not in camera_path_set:
+            continue
+        status = str(entry.get("status") or "").lower()
+        if require_complete:
+            if status not in {"synced", "failed"}:
+                continue
+        elif status != "synced":
+            continue
+        relevant_entries_by_path[entry_path] = entry
+
+    if require_complete:
+        if not all(path in relevant_entries_by_path for path in camera_paths):
+            return None
+    elif not relevant_entries_by_path:
+        return None
+
+    filtered_entries = [relevant_entries_by_path[path] for path in camera_paths if path in relevant_entries_by_path]
+    reusable_payload = dict(payload)
+    reusable_payload["entries"] = filtered_entries
+    reusable_payload["summary"] = {
+        "total": len(filtered_entries),
+        "synced": sum(1 for entry in filtered_entries if str(entry.get("status") or "") == "synced"),
+        "failed": sum(1 for entry in filtered_entries if str(entry.get("status") or "") == "failed"),
+    }
+    return reusable_payload
+
 INDEX_HTML = """<!doctype html>
 <html lang="de">
 <head>
@@ -1198,6 +1250,7 @@ class UIState:
             camera_paths = set(camera_path_list)
             asset_ids = _derive_asset_ids(camera_path_list)
             asset_id_by_path = dict(zip(camera_path_list, asset_ids, strict=True))
+            artifact_paths = _artifact_layout(self._projects[project_id], classification)
             classification["camera_asset_ids"] = asset_ids
             classification["camera_roles"] = {}
             classification["camera_role_source"] = None
@@ -1375,8 +1428,65 @@ class UIState:
             partial_path = artifact_paths["sync_partial_path"]
             analysis_futures: dict[str, Future[dict[str, Any]]] = {}
             transcript_future: Future[dict[str, Any]] | None = None
+            reusable_sync_map = _load_reusable_sync_map(
+                artifact_paths["sync_map_path"],
+                str(master_path),
+                camera_path_list,
+                require_complete=True,
+            )
+            reusable_partial_sync_map = None if reusable_sync_map is not None else _load_reusable_sync_map(
+                artifact_paths["sync_partial_path"],
+                str(master_path),
+                camera_path_list,
+                require_complete=False,
+            )
             reusable_transcript = _load_reusable_transcript_artifact(artifact_paths["transcript_path"], str(master_path))
             reusable_analysis_map = _load_reusable_analysis_map(artifact_paths["analysis_map_path"], str(master_path), camera_path_list)
+
+            if reusable_sync_map is None and reusable_partial_sync_map is None:
+                with self._lock:
+                    cached_sync_map_paths = [
+                        Path(str(other_project.get("artifacts", {}).get("sync_map_path")))
+                        for other_project in self._projects.values()
+                        if other_project.get("id") != project_id and other_project.get("artifacts", {}).get("sync_map_path")
+                    ]
+                    cached_partial_sync_paths = [
+                        Path(str(other_project.get("artifacts", {}).get("partial_sync_map_path")))
+                        for other_project in self._projects.values()
+                        if other_project.get("id") != project_id and other_project.get("artifacts", {}).get("partial_sync_map_path")
+                    ]
+                for candidate_path in cached_sync_map_paths:
+                    candidate_payload = _load_reusable_sync_map(
+                        candidate_path,
+                        str(master_path),
+                        camera_path_list,
+                        require_complete=True,
+                    )
+                    if candidate_payload is None:
+                        continue
+                    try:
+                        artifact_paths["sync_map_path"].write_bytes(candidate_path.read_bytes())
+                    except Exception:
+                        continue
+                    reusable_sync_map = candidate_payload
+                    break
+
+                if reusable_sync_map is None:
+                    for candidate_path in cached_partial_sync_paths:
+                        candidate_payload = _load_reusable_sync_map(
+                            candidate_path,
+                            str(master_path),
+                            camera_path_list,
+                            require_complete=False,
+                        )
+                        if candidate_payload is None:
+                            continue
+                        try:
+                            artifact_paths["sync_partial_path"].write_bytes(candidate_path.read_bytes())
+                        except Exception:
+                            continue
+                        reusable_partial_sync_map = candidate_payload
+                        break
 
             if reusable_transcript is None:
                 with self._lock:
@@ -1622,12 +1732,114 @@ class UIState:
                 self._write_project_manifest(project_id)
                 _set_media_progress("transcript", 100.0, "Using existing transcript.", "done")
             _publish_media_progress()
+            cached_sync_entries_by_path: dict[str, dict[str, Any]] = {}
+            if reusable_sync_map is not None:
+                entries = list(reusable_sync_map.get("entries") or [])
+                master_summary = reusable_sync_map.get("master") if isinstance(reusable_sync_map.get("master"), dict) else None
+                cached_sync_entries_by_path = {
+                    str(entry.get("path") or ""): entry
+                    for entry in entries
+                    if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                }
+                for camera_path in camera_path_list:
+                    asset_id = asset_id_by_path[camera_path]
+                    role = classification["camera_roles"].get(asset_id)
+                    sync_entry = cached_sync_entries_by_path.get(camera_path)
+                    if sync_entry is None:
+                        continue
+                    entry_status = "synced" if str(sync_entry.get("status") or "") == "synced" else "failed"
+                    if entry_status != "synced":
+                        analysis_progress_by_asset[asset_id] = 100.0
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status=entry_status,
+                        ui_note=_format_camera_note(
+                            role,
+                            "Using existing sync data."
+                            if entry_status == "synced"
+                            else str(sync_entry.get("error") or "Existing sync data marked this camera as failed."),
+                        ),
+                        extra_fields={
+                            "camera_role": role,
+                            "ui_progress_percent": 100.0,
+                            "ui_progress_label": "Sync",
+                            "ui_progress_color": "#63c178" if entry_status == "synced" else "#e26060",
+                        },
+                    )
+                self._update_project(
+                    project_id,
+                    artifacts={
+                        **self._projects[project_id]["artifacts"],
+                        "sync_map_path": str(artifact_paths["sync_map_path"]),
+                    },
+                )
+                self._write_project_manifest(project_id)
+                _set_media_progress("sync", 100.0, "Using existing sync map.", "done")
+            elif reusable_partial_sync_map is not None:
+                entries = list(reusable_partial_sync_map.get("entries") or [])
+                master_summary = reusable_partial_sync_map.get("master") if isinstance(reusable_partial_sync_map.get("master"), dict) else None
+                cached_sync_entries_by_path = {
+                    str(entry.get("path") or ""): entry
+                    for entry in entries
+                    if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                }
+                for camera_path in camera_path_list:
+                    sync_entry = cached_sync_entries_by_path.get(camera_path)
+                    if sync_entry is None:
+                        continue
+                    asset_id = asset_id_by_path[camera_path]
+                    role = classification["camera_roles"].get(asset_id)
+                    self._update_project_file(
+                        project_id,
+                        camera_path,
+                        ui_status="synced",
+                        ui_note=_format_camera_note(role, "Using existing sync data from previous run."),
+                        extra_fields={
+                            "camera_role": role,
+                            "ui_progress_percent": 100.0,
+                            "ui_progress_label": "Sync",
+                            "ui_progress_color": "#63c178",
+                        },
+                    )
+                self._update_project(
+                    project_id,
+                    artifacts={
+                        **self._projects[project_id]["artifacts"],
+                        "partial_sync_map_path": str(artifact_paths["sync_partial_path"]),
+                    },
+                )
+                self._write_project_manifest(project_id)
+                _set_media_progress(
+                    "sync",
+                    100.0 * len(cached_sync_entries_by_path) / max(1, len(camera_path_list)),
+                    f"Resuming from existing sync data ({len(cached_sync_entries_by_path)}/{len(camera_path_list)}).",
+                    "running",
+                )
 
             for index, camera_path in enumerate(camera_path_list, start=1):
                 self._wait_if_paused(job_id)
                 self._raise_if_canceled(job_id)
                 asset_id = asset_id_by_path[camera_path]
                 role = classification["camera_roles"].get(asset_id)
+                existing_sync_entry = cached_sync_entries_by_path.get(camera_path)
+                if isinstance(existing_sync_entry, dict) and (
+                    reusable_sync_map is not None or str(existing_sync_entry.get("status") or "") == "synced"
+                ):
+                    if reusable_analysis_map is None and str(existing_sync_entry.get("status") or "") == "synced":
+                        analysis_futures[asset_id] = media_executor.submit(
+                            _run_camera_analysis,
+                            existing_sync_entry,
+                            camera_path,
+                            role,
+                        )
+                    _set_media_progress(
+                        "sync",
+                        100.0 * len(cached_sync_entries_by_path) / max(1, len(camera_path_list)),
+                        f"Resuming sync ({len(cached_sync_entries_by_path)}/{len(camera_path_list)} cameras already cached).",
+                        "done" if reusable_sync_map is not None else "running",
+                    )
+                    continue
                 self._update_project_file(
                     project_id,
                     camera_path,
@@ -1754,7 +1966,10 @@ class UIState:
                     "done" if index == len(camera_path_list) else "running",
                 )
 
-            final_sync_map = json.loads(partial_path.read_text(encoding="utf-8-sig"))
+            if reusable_sync_map is not None:
+                final_sync_map = reusable_sync_map
+            else:
+                final_sync_map = json.loads(partial_path.read_text(encoding="utf-8-sig"))
             sync_map_path = artifact_paths["sync_map_path"]
             write_sync_map(final_sync_map, str(sync_map_path))
             self._update_project(
