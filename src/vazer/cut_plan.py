@@ -8,6 +8,7 @@ from typing import Any
 
 from . import __version__
 from .fftools import MediaInfo, probe_media
+from .transcript import transcript_source_metadata
 
 EPSILON = 1e-6
 SENTENCE_ENDINGS = (".", "!", "?", ";", ":")
@@ -625,10 +626,7 @@ def build_baseline_cut_plan(
         },
         "source_transcript": None
         if transcript_artifact is None
-        else {
-            "schema_version": transcript_artifact["source"]["schema_version"],
-            "path": source_transcript_path,
-        },
+        else transcript_source_metadata(transcript_artifact, path=source_transcript_path),
         "draft_options": {
             "transcript_pause_boundary_seconds": draft_options.transcript_pause_boundary_seconds,
             "word_timestamps_available": bool(_transcript_words(transcript_artifact)),

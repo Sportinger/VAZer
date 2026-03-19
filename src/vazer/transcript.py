@@ -5,6 +5,8 @@ from pathlib import Path
 import json
 from typing import Any
 
+TRANSCRIPT_SCHEMA_VERSION = "vazer.transcript.v1"
+
 
 @dataclass(slots=True)
 class TranscriptSegment:
@@ -129,4 +131,35 @@ def load_transcript_artifact(path: str) -> dict[str, Any]:
             }
             for word in words
         ],
+    }
+
+
+def transcript_source_metadata(
+    transcript_artifact: dict[str, Any] | None,
+    *,
+    path: str | None = None,
+) -> dict[str, Any] | None:
+    if transcript_artifact is None:
+        return None
+
+    existing_source = transcript_artifact.get("source")
+    if isinstance(existing_source, dict):
+        schema_version = existing_source.get("schema_version")
+        normalized = {
+            **existing_source,
+            "schema_version": str(schema_version or transcript_artifact.get("schema_version") or "external.transcript"),
+        }
+        if path is not None:
+            normalized["path"] = path
+        elif "path" not in normalized:
+            normalized["path"] = None
+        return normalized
+
+    schema_version = transcript_artifact.get("schema_version")
+    if not isinstance(schema_version, str) or not schema_version:
+        schema_version = "external.transcript"
+
+    return {
+        "schema_version": schema_version,
+        "path": path,
     }

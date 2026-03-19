@@ -12,6 +12,7 @@ import cv2
 
 from . import __version__
 from .fftools import probe_media
+from .transcript import transcript_source_metadata
 
 EPSILON = 1e-6
 ROLE_ORDER = {
@@ -479,10 +480,7 @@ def build_visual_packet(
         },
         "source_transcript": None
         if transcript_artifact is None
-        else {
-            "schema_version": transcript_artifact["source"]["schema_version"],
-            "path": source_transcript_path,
-        },
+        else transcript_source_metadata(transcript_artifact, path=source_transcript_path),
         "source_cut_plan": None
         if cut_plan is None
         else {

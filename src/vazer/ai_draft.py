@@ -24,6 +24,7 @@ from .cut_plan import (
     _transcript_excerpt,
 )
 from .draft_prompt import THEATER_VAZ_DECISION_RULES, THEATER_VAZ_SYSTEM_PROMPT
+from .transcript import transcript_source_metadata
 
 DEFAULT_AI_DRAFT_MODEL = "gpt-4.1-mini"
 
@@ -517,10 +518,7 @@ def build_ai_draft_cut_plan(
         },
         "source_transcript": None
         if transcript_artifact is None
-        else {
-            "schema_version": transcript_artifact["source"]["schema_version"],
-            "path": source_transcript_path,
-        },
+        else transcript_source_metadata(transcript_artifact, path=source_transcript_path),
         "source_visual_packet": {
             "schema_version": visual_packet["schema_version"],
             "path": source_visual_packet_path,

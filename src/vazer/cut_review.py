@@ -12,6 +12,7 @@ import numpy as np
 from . import __version__
 from .cut_plan import _merge_video_segments
 from .fftools import probe_media
+from .transcript import transcript_source_metadata
 
 EPSILON = 1e-6
 SENTENCE_ENDINGS = (".", "!", "?", ";", ":")
@@ -832,10 +833,7 @@ def build_cut_validation_report(
         },
         "source_transcript": None
         if transcript_artifact is None
-        else {
-            "schema_version": transcript_artifact["source"]["schema_version"],
-            "path": source_transcript_path,
-        },
+        else transcript_source_metadata(transcript_artifact, path=source_transcript_path),
         "options": {
             "transcript_search_window_seconds": validation_options.transcript_search_window_seconds,
             "transcript_pause_boundary_seconds": validation_options.transcript_pause_boundary_seconds,

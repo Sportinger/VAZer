@@ -13,6 +13,7 @@ from typing import Any
 from . import __version__
 from .fftools import probe_media
 from .process_manager import run_managed
+from .transcript import TRANSCRIPT_SCHEMA_VERSION
 
 
 DEFAULT_TRANSCRIBE_MODEL = "whisper-1"
@@ -279,7 +280,7 @@ def build_master_transcript(
 
     full_text = "\n\n".join(part for part in full_text_parts if part).strip()
     return {
-        "schema_version": "vazer.transcript.v1",
+        "schema_version": TRANSCRIPT_SCHEMA_VERSION,
         "generated_at_utc": _utc_timestamp(),
         "tool": {
             "name": "vazer",
@@ -288,6 +289,10 @@ def build_master_transcript(
         "provider": {
             "name": "openai",
             "model": transcription_options.model,
+        },
+        "source": {
+            "schema_version": TRANSCRIPT_SCHEMA_VERSION,
+            "path": None,
         },
         "source_sync_map": None
         if source_sync_map_path is None
