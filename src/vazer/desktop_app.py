@@ -774,11 +774,24 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             paths = [file_info["stored_path"] for file_info in self.staged_files]
             project_name = self._suggest_project_name(paths)
             output_mode = str(self.output_mode_combo.currentData() or OUTPUT_MODE_RENDER_AND_PREMIERE)
+            reset_existing = False
+            try:
+                existing_run = self.app_state.inspect_existing_source_run(paths)
+            except Exception as error:
+                QMessageBox.critical(self, "VAZer", str(error))
+                return
+            if existing_run is not None:
+                decision = self._ask_existing_run_decision(existing_run)
+                if decision == "cancel":
+                    self.status_label.setText("VAZ-Start abgebrochen.")
+                    return
+                reset_existing = decision == "reset"
             try:
                 result = self.app_state.create_project_from_paths(
                     paths,
                     name=project_name,
                     output_mode=output_mode,
+                    reset_existing=reset_existing,
                 )
             except Exception as error:
                 QMessageBox.critical(self, "VAZer", str(error))
@@ -790,6 +803,52 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.output_mode_combo.setEnabled(False)
             self.status_label.setText(f"VAZ gestartet: {project_name} | {self._output_mode_label(output_mode)}")
             self.refresh_state()
+
+        def _ask_existing_run_decision(self, existing_run: dict[str, Any]) -> str:
+            artifact_flags = existing_run.get("artifact_flags") or {}
+            lines = [
+                "Im Medienordner wurden bereits VAZer-Daten gefunden.",
+                str(existing_run.get("project_dir") or "-"),
+                "",
+                f"Zustand: {existing_run.get('summary') or '-'}",
+            ]
+            found = []
+            if artifact_flags.get("camera_roles"):
+                found.append("Rollen")
+            if artifact_flags.get("sync_partial") or artifact_flags.get("sync_complete"):
+                found.append("Sync")
+            if artifact_flags.get("transcript"):
+                found.append("Transcript")
+            if artifact_flags.get("analysis"):
+                found.append("Analyse")
+            if artifact_flags.get("planning") or artifact_flags.get("repair"):
+                found.append("Schnittdaten")
+            if artifact_flags.get("premiere"):
+                found.append("Premiere")
+            if artifact_flags.get("render"):
+                found.append("MP4")
+            if found:
+                lines.append(f"Gefunden: {', '.join(found)}")
+            if existing_run.get("legacy_count"):
+                lines.append(f"Zusätzlich alte Root-Artefakte: {existing_run['legacy_count']}")
+            lines.append("")
+            lines.append("Fortsetzen verwendet vorhandene Daten. Neu beginnen leert den VAZer-Ordner und startet frisch.")
+
+            message_box = QMessageBox(self)
+            message_box.setIcon(QMessageBox.Icon.Question)
+            message_box.setWindowTitle("VAZer")
+            message_box.setText("\n".join(lines))
+            continue_button = message_box.addButton("Fortsetzen", QMessageBox.ButtonRole.AcceptRole)
+            reset_button = message_box.addButton("Neu beginnen", QMessageBox.ButtonRole.DestructiveRole)
+            cancel_button = message_box.addButton("Abbrechen", QMessageBox.ButtonRole.RejectRole)
+            message_box.setDefaultButton(continue_button)
+            message_box.exec()
+            clicked = message_box.clickedButton()
+            if clicked == continue_button:
+                return "continue"
+            if clicked == reset_button:
+                return "reset"
+            return "cancel"
 
         def confirm_role_review(self) -> None:
             if not self.active_job_id:

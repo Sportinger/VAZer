@@ -41,6 +41,18 @@ IGNORED_IMPORT_FILENAMES = {
     "desktop.ini",
 }
 
+LEGACY_ROOT_ARTIFACT_FILES = {
+    "vazer.sync_map.partial.json",
+    "vazer.sync_map.json",
+    "vazer.camera_roles.json",
+    "vazer.analysis_map.json",
+    "vazer.visual_packet.json",
+    "vazer.cut_plan.ai.json",
+    "vazer.cut_validation.json",
+    "vazer.cut_plan.repaired.json",
+    "vazer.cut_plan.repaired.fhd.json",
+}
+
 OUTPUT_MODE_RENDER_AND_PREMIERE = "render_and_premiere"
 OUTPUT_MODE_PREMIERE_ONLY = "premiere_only"
 
@@ -83,6 +95,20 @@ def should_ignore_import_file(path: Path) -> bool:
 
 
 def resolve_default_output_dir(paths: list[Path]) -> str | None:
+    project_dir = resolve_default_project_dir(paths)
+    if project_dir is None:
+        return None
+    return str(project_dir / "output")
+
+
+def resolve_default_artifacts_dir(paths: list[Path]) -> str | None:
+    project_dir = resolve_default_project_dir(paths)
+    if project_dir is None:
+        return None
+    return str(project_dir / "artifacts")
+
+
+def resolve_default_project_dir(paths: list[Path]) -> Path | None:
     if not paths:
         return None
 
@@ -92,11 +118,7 @@ def resolve_default_output_dir(paths: list[Path]) -> str | None:
     except ValueError:
         return None
 
-    return str(common_parent) if common_parent.exists() else None
-
-
-def resolve_default_artifacts_dir(paths: list[Path]) -> str | None:
-    return resolve_default_output_dir(paths)
+    return (common_parent / "VAZer") if common_parent.exists() else None
 
 
 def _slugify(value: str) -> str:
@@ -126,6 +148,8 @@ def _artifact_layout(project: dict[str, Any], classification: dict[str, Any] | N
     project_slug = _slugify(str(project.get("name") or "vazer"))
     return {
         "root": artifacts_root,
+        "project_root": artifacts_root.parent,
+        "state_path": artifacts_root.parent / "vazer.state.json",
         "sync_partial_path": artifacts_root / "vazer.sync_map.partial.json",
         "sync_map_path": artifacts_root / "vazer.sync_map.json",
         "camera_roles_path": artifacts_root / "vazer.camera_roles.json",
@@ -140,6 +164,28 @@ def _artifact_layout(project: dict[str, Any], classification: dict[str, Any] | N
         "cut_plan_render_path": artifacts_root / "vazer.cut_plan.repaired.fhd.json",
         "render_root": artifacts_root / "vazer.render",
     }
+
+
+def _project_data_root(project: dict[str, Any]) -> Path:
+    artifacts_root = Path(project["artifacts_path"])
+    if artifacts_root.name.lower() == "artifacts":
+        return artifacts_root.parent
+    return artifacts_root
+
+
+def _iter_legacy_artifact_paths(common_parent: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for name in sorted(LEGACY_ROOT_ARTIFACT_FILES):
+        candidate = common_parent / name
+        if candidate.exists():
+            candidates.append(candidate)
+    for pattern in ("*.transcript.json", "vazer.*.planning", "vazer.camera_roles", "vazer.render"):
+        for candidate in sorted(common_parent.glob(pattern)):
+            if candidate.name == "VAZer":
+                continue
+            if candidate.exists():
+                candidates.append(candidate)
+    return candidates
 
 
 def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
@@ -625,6 +671,8 @@ class UIState:
         paths: list[str],
         name: str | None = None,
         output_mode: str | None = None,
+        *,
+        reset_existing: bool = False,
     ) -> dict[str, Any]:
         resolved_paths = [
             Path(path).expanduser().resolve()
@@ -636,6 +684,10 @@ class UIState:
         missing = [path for path in resolved_paths if not path.is_file()]
         if missing:
             raise ValueError(f"One or more files do not exist: {missing[0]}")
+
+        if reset_existing:
+            self.reset_existing_source_run([str(path) for path in resolved_paths])
+        self._prepare_source_project_dir([str(path) for path in resolved_paths])
 
         project_id = f"proj_{uuid.uuid4().hex[:10]}"
         project_name = (name or resolved_paths[0].stem or project_id).strip() or project_id
@@ -663,6 +715,134 @@ class UIState:
             files=files,
             output_mode=normalized_output_mode,
         )
+
+    def _prepare_source_project_dir(self, paths: list[str]) -> dict[str, Any] | None:
+        resolved_paths = [
+            Path(path).expanduser().resolve()
+            for path in paths
+            if not should_ignore_import_file(Path(path).expanduser())
+        ]
+        if not resolved_paths:
+            return None
+        project_dir = resolve_default_project_dir(resolved_paths)
+        if project_dir is None:
+            return None
+        project_dir.mkdir(parents=True, exist_ok=True)
+        artifacts_dir = project_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = project_dir / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        common_parent = project_dir.parent
+        migrated: list[str] = []
+        for legacy_path in _iter_legacy_artifact_paths(common_parent):
+            destination = artifacts_dir / legacy_path.name
+            if legacy_path.is_dir():
+                if destination.exists():
+                    continue
+                shutil.move(str(legacy_path), str(destination))
+                migrated.append(legacy_path.name)
+                continue
+            if destination.exists():
+                continue
+            shutil.move(str(legacy_path), str(destination))
+            migrated.append(legacy_path.name)
+        return {
+            "project_dir": str(project_dir),
+            "artifacts_dir": str(artifacts_dir),
+            "output_dir": str(output_dir),
+            "migrated": migrated,
+        }
+
+    def inspect_existing_source_run(self, paths: list[str]) -> dict[str, Any] | None:
+        resolved_paths = [
+            Path(path).expanduser().resolve()
+            for path in paths
+            if not should_ignore_import_file(Path(path).expanduser())
+        ]
+        if not resolved_paths:
+            return None
+        project_dir = resolve_default_project_dir(resolved_paths)
+        if project_dir is None:
+            return None
+        common_parent = project_dir.parent
+        legacy_paths = _iter_legacy_artifact_paths(common_parent)
+        state_path = project_dir / "vazer.state.json"
+        artifacts_dir = project_dir / "artifacts"
+        output_dir = project_dir / "output"
+        if not project_dir.exists() and not legacy_paths:
+            return None
+
+        state_payload = _load_json_if_exists(state_path)
+        latest_job = state_payload.get("latest_job") if isinstance(state_payload, dict) else None
+        latest_status = str((latest_job or {}).get("status") or "").strip().lower()
+        latest_stage = str((latest_job or {}).get("stage_label") or (latest_job or {}).get("stage") or "").strip()
+        artifact_flags = {
+            "camera_roles": (artifacts_dir / "vazer.camera_roles.json").exists(),
+            "sync_partial": (artifacts_dir / "vazer.sync_map.partial.json").exists(),
+            "sync_complete": (artifacts_dir / "vazer.sync_map.json").exists(),
+            "transcript": any(artifacts_dir.glob("*.transcript.json")),
+            "analysis": (artifacts_dir / "vazer.analysis_map.json").exists(),
+            "planning": (artifacts_dir / "vazer.cut_plan.ai.json").exists(),
+            "repair": (artifacts_dir / "vazer.cut_plan.repaired.json").exists(),
+            "premiere": any(output_dir.glob("*.prproj")),
+            "render": any(output_dir.glob("*.mp4")),
+        }
+
+        if latest_status == "completed" or artifact_flags["render"] or artifact_flags["premiere"]:
+            summary = "Abgeschlossen"
+        elif latest_status in {"running", "pause_requested", "paused", "review_required", "queued"}:
+            summary = f"Unterbrochen bei {latest_stage or 'einem Verarbeitungsschritt'}"
+        elif latest_status == "failed":
+            summary = f"Fehler bei {latest_stage or 'einem Verarbeitungsschritt'}"
+        elif artifact_flags["repair"] or artifact_flags["planning"]:
+            summary = "Teilweise fertig bis Schnittplanung"
+        elif artifact_flags["analysis"]:
+            summary = "Teilweise fertig bis Analyse"
+        elif artifact_flags["transcript"]:
+            summary = "Teilweise fertig bis Transcript"
+        elif artifact_flags["sync_complete"] or artifact_flags["sync_partial"]:
+            summary = "Teilweise fertig bis Sync"
+        elif artifact_flags["camera_roles"]:
+            summary = "Teilweise fertig bis Rollen-Erkennung"
+        elif legacy_paths:
+            summary = "Alte VAZer-Artefakte im Medienordner gefunden"
+        else:
+            summary = "VAZer-Projektordner vorhanden"
+
+        return {
+            "project_dir": str(project_dir),
+            "artifacts_dir": str(artifacts_dir),
+            "output_dir": str(output_dir),
+            "state_path": str(state_path),
+            "summary": summary,
+            "latest_status": latest_status or None,
+            "latest_stage": latest_stage or None,
+            "artifact_flags": artifact_flags,
+            "legacy_count": len(legacy_paths),
+        }
+
+    def reset_existing_source_run(self, paths: list[str]) -> None:
+        resolved_paths = [
+            Path(path).expanduser().resolve()
+            for path in paths
+            if not should_ignore_import_file(Path(path).expanduser())
+        ]
+        if not resolved_paths:
+            return
+        project_dir = resolve_default_project_dir(resolved_paths)
+        if project_dir is not None and project_dir.exists():
+            shutil.rmtree(project_dir, ignore_errors=True)
+        common_parent = project_dir.parent if project_dir is not None else None
+        if common_parent is not None:
+            for legacy_path in _iter_legacy_artifact_paths(common_parent):
+                if legacy_path.is_dir():
+                    shutil.rmtree(legacy_path, ignore_errors=True)
+                else:
+                    try:
+                        legacy_path.unlink()
+                    except FileNotFoundError:
+                        pass
 
     def _register_project_and_start_job(
         self,
@@ -734,6 +914,7 @@ class UIState:
                 "executor": None,
             }
             self._persist_state()
+        self._write_project_manifest(project_id)
 
         thread = threading.Thread(target=self._run_project_job_v2, args=(project_id, job_id), daemon=True)
         self._runtimes[job_id]["thread"] = thread
@@ -894,11 +1075,15 @@ class UIState:
             self._persist_state()
 
     def _update_job(self, job_id: str, **changes: Any) -> None:
+        project_id: str | None = None
         with self._lock:
             job = self._jobs[job_id]
             job.update(changes)
             job["updated_at_utc"] = _utc_timestamp()
+            project_id = str(job.get("project_id") or "") or None
             self._persist_state()
+        if project_id:
+            self._write_project_manifest(project_id)
 
     def _write_project_manifest(self, project_id: str) -> None:
         with self._lock:
@@ -906,6 +1091,27 @@ class UIState:
             root = Path(project["root_path"])
             manifest_path = root / "project.json"
             manifest_path.write_text(json.dumps(project, indent=2), encoding="utf-8")
+            job_ids = list(project.get("job_ids") or [])
+            latest_job = self._jobs.get(job_ids[-1]) if job_ids else None
+            data_root = _project_data_root(project)
+            if project.get("inputs_path") is None:
+                data_root.mkdir(parents=True, exist_ok=True)
+                state_payload = {
+                    "schema_version": "vazer.state.v1",
+                    "project_id": project.get("id"),
+                    "project_name": project.get("name"),
+                    "updated_at_utc": _utc_timestamp(),
+                    "artifacts_path": project.get("artifacts_path"),
+                    "default_output_dir": project.get("default_output_dir"),
+                    "output_mode": project.get("output_mode"),
+                    "files": [str(file_info.get("stored_path") or "") for file_info in project.get("files") or []],
+                    "latest_job": latest_job or None,
+                    "artifacts": dict(project.get("artifacts") or {}),
+                }
+                (data_root / "vazer.state.json").write_text(
+                    json.dumps(state_payload, indent=2),
+                    encoding="utf-8",
+                )
 
     def _wait_if_paused(self, job_id: str) -> None:
         runtime = self._runtimes[job_id]

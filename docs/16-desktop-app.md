@@ -50,13 +50,15 @@ Das heisst:
 - kein Browser-Upload
 - keine Kopie ins Workspace nur fuer den Import
 - kein separater HTTP-Server im Desktop-Modus
-- bei Referenzprojekten liegen die wichtigsten Artefakte jetzt standardmaessig direkt im gemeinsamen Quellordner
-- vorhandene Artefakte im Quellordner werden nach Moeglichkeit wiederverwendet
-- vorhandene Transcript-/Analysis-Artefakte aus aelteren Workspace-Projekten koennen in den Quellordner zurueckkopiert und dort weiterverwendet werden
-- der finale Render landet bei Desktop-Referenzprojekten standardmaessig im gemeinsamen Quellordner
+- bei Referenzprojekten liegen die wichtigsten Artefakte jetzt standardmaessig in einem Unterordner `VAZer` im gemeinsamen Quellordner
+- darunter trennt VAZer jetzt sauber in `VAZer\artifacts`, `VAZer\output` und `VAZer\vazer.state.json`
+- vorhandene Artefakte im `VAZer`-Ordner werden nach Moeglichkeit wiederverwendet
+- vorhandene Transcript-/Analysis-/Sync-Artefakte aus aelteren Workspace-Projekten oder aus alten Root-Dateien koennen in den `VAZer`-Ordner uebernommen und dort weiterverwendet werden
+- der finale Render landet bei Desktop-Referenzprojekten standardmaessig in `VAZer\output`
 - wenn die Quelldateien aus verschiedenen Ordnern kommen, faellt VAZer auf den Projekt-Workspace als Output-Ziel zurueck
 - offensichtliche Sidecar-/Hidden-Dateien wie `._*.MXF` werden beim Import ignoriert
 - beim Schliessen werden laufende Jobs abgebrochen und registrierte `ffmpeg`/`ffprobe`-Prozesse beendet
+- wenn bereits VAZer-Daten im Medienordner vorhanden sind, fragt die Desktop-App jetzt vor dem Start: `Fortsetzen`, `Neu beginnen` oder `Abbrechen`
 
 Das ist fuer lange 4K-Theatermitschnitte deutlich sinnvoller als ein Browser-Upload.
 
@@ -80,15 +82,18 @@ Der Desktop-Job macht bisher:
 
 Artefakte:
 
-- `vazer.camera_roles.json`
-- `vazer.sync_map.json`
-- `<master>.transcript.json`
-- `vazer.analysis_map.json`
-- `vazer.visual_packet.json`
-- `vazer.cut_plan.ai.json`
-- `vazer.cut_validation.json`
-- `vazer.cut_plan.repaired.json`
-- finaler FHD-Render im Projektordner
+- `VAZer\artifacts\vazer.camera_roles.json`
+- `VAZer\artifacts\vazer.sync_map.json`
+- `VAZer\artifacts\vazer.sync_map.partial.json`
+- `VAZer\artifacts\<master>.transcript.json`
+- `VAZer\artifacts\vazer.analysis_map.json`
+- `VAZer\artifacts\vazer.visual_packet.json`
+- `VAZer\artifacts\vazer.cut_plan.ai.json`
+- `VAZer\artifacts\vazer.cut_validation.json`
+- `VAZer\artifacts\vazer.cut_plan.repaired.json`
+- `VAZer\output\*.prproj`
+- `VAZer\output\*.mp4`
+- `VAZer\vazer.state.json` als Start-/Resume-Hinweis fuer den letzten bekannten Zustand
 
 ## Was noch fehlt
 
