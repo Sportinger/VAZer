@@ -11,6 +11,8 @@ from .process_manager import popen_managed, unregister_process
 
 
 _ENCODER_AVAILABILITY_CACHE: dict[str, bool] = {}
+_FILTER_AVAILABILITY_CACHE: dict[str, bool] = {}
+_HWACCEL_AVAILABILITY_CACHE: dict[str, bool] = {}
 
 
 def _utc_timestamp() -> str:
@@ -49,6 +51,54 @@ def _ffmpeg_has_encoder(name: str) -> bool:
     return available
 
 
+def _ffmpeg_has_filter(name: str) -> bool:
+    normalized = str(name or "").strip()
+    if not normalized:
+        return False
+    cached = _FILTER_AVAILABILITY_CACHE.get(normalized)
+    if cached is not None:
+        return cached
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        available = result.returncode == 0 and normalized in (result.stdout or "")
+    except Exception:
+        available = False
+    _FILTER_AVAILABILITY_CACHE[normalized] = available
+    return available
+
+
+def _ffmpeg_has_hwaccel(name: str) -> bool:
+    normalized = str(name or "").strip().lower()
+    if not normalized:
+        return False
+    cached = _HWACCEL_AVAILABILITY_CACHE.get(normalized)
+    if cached is not None:
+        return cached
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        available = result.returncode == 0 and normalized in (result.stdout or "").lower()
+    except Exception:
+        available = False
+    _HWACCEL_AVAILABILITY_CACHE[normalized] = available
+    return available
+
+
 def _resolve_video_codec(requested_codec: str) -> str:
     normalized = str(requested_codec or "").strip().lower()
     if normalized in {"", "auto", "default", "libx264"}:
@@ -67,28 +117,89 @@ def _video_codec_args(codec: str) -> list[str]:
     return []
 
 
-def _build_filtergraph(cut_plan: dict[str, Any], input_indexes: dict[str, int]) -> str:
+def _cuda_surface_format(pixel_format: str) -> str:
+    normalized = str(pixel_format or "").strip().lower()
+    if normalized in {"", "yuv420p", "nv12"}:
+        return "nv12"
+    if normalized == "p010le":
+        return "p010le"
+    raise ValueError(
+        f"Requested output pixel format '{pixel_format}' is not supported by the strict CUDA render path."
+    )
+
+
+def _resolve_render_pipeline(video_codec: str, pixel_format: str) -> dict[str, Any]:
+    use_cuda_video = video_codec == "h264_nvenc"
+    if not use_cuda_video:
+        return {
+            "video_path": "cpu",
+            "input_args": [],
+            "cuda_surface_format": None,
+            "encoder_pixel_format": pixel_format,
+        }
+
+    missing: list[str] = []
+    if not _ffmpeg_has_hwaccel("cuda"):
+        missing.append("hwaccel cuda")
+    if not _ffmpeg_has_filter("scale_cuda"):
+        missing.append("scale_cuda")
+    if not _ffmpeg_has_filter("pad_cuda"):
+        missing.append("pad_cuda")
+    if missing:
+        raise ValueError(
+            "Strict CUDA render path is enabled, but ffmpeg is missing required CUDA components: "
+            + ", ".join(missing)
+        )
+
+    return {
+        "video_path": "cuda",
+        "input_args": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-extra_hw_frames", "8"],
+        "cuda_surface_format": _cuda_surface_format(pixel_format),
+        "encoder_pixel_format": _cuda_surface_format(pixel_format),
+    }
+
+
+def _build_filtergraph(
+    cut_plan: dict[str, Any],
+    input_indexes: dict[str, int],
+    *,
+    render_pipeline: dict[str, Any],
+) -> str:
     render_defaults = cut_plan["render_defaults"]
     width = int(render_defaults["width"])
     height = int(render_defaults["height"])
     fps = float(render_defaults["fps"])
     pixel_format = str(render_defaults["pixel_format"])
+    use_cuda_video = render_pipeline.get("video_path") == "cuda"
+    cuda_surface_format = render_pipeline.get("cuda_surface_format")
 
     lines: list[str] = []
 
     for index, segment in enumerate(cut_plan["video_segments"], start=1):
         input_index = input_indexes[segment["asset_path"]]
-        lines.append(
-            f"[{input_index}:v]"
+        video_filters = [
             f"trim=start={_format_seconds(segment['source_start_seconds'])}:"
-            f"end={_format_seconds(segment['source_end_seconds'])},"
-            f"setpts=(PTS-STARTPTS)/{segment['speed']:.12f},"
-            f"fps={fps:.6f},"
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
-            f"format={pixel_format}"
-            f"[v{index}]"
-        )
+            f"end={_format_seconds(segment['source_end_seconds'])}",
+            f"setpts=(PTS-STARTPTS)/{segment['speed']:.12f}",
+            f"fps={fps:.6f}",
+        ]
+        if use_cuda_video:
+            video_filters.extend(
+                [
+                    f"scale_cuda={width}:{height}:force_original_aspect_ratio=decrease:format={cuda_surface_format}",
+                    f"pad_cuda={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                ]
+            )
+        else:
+            video_filters.extend(
+                [
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
+                    f"format={pixel_format}",
+                ]
+            )
+
+        lines.append(f"[{input_index}:v]{','.join(video_filters)}[v{index}]")
 
     video_concat_inputs = "".join(f"[v{index}]" for index in range(1, len(cut_plan["video_segments"]) + 1))
     lines.append(f"{video_concat_inputs}concat=n={len(cut_plan['video_segments'])}:v=1:a=0[vout]")
@@ -133,8 +244,6 @@ def build_render_scaffold(
             video_paths.append(path)
 
     input_indexes = {path: index for index, path in enumerate(video_paths, start=1)}
-    filtergraph = _build_filtergraph(cut_plan, input_indexes)
-
     output_path = Path(output_media_path)
     scaffold_root = Path(scaffold_dir)
     scaffold_root.mkdir(parents=True, exist_ok=True)
@@ -144,18 +253,19 @@ def build_render_scaffold(
     command_path = scaffold_root / f"{stem}.ffmpeg.txt"
     manifest_path = scaffold_root / f"{stem}.render.json"
 
-    filtergraph_path.write_text(filtergraph, encoding="utf-8")
-
     render_defaults = json.loads(json.dumps(cut_plan["render_defaults"]))
     resolved_video_codec = _resolve_video_codec(str(render_defaults.get("video_codec") or ""))
     render_defaults["video_codec"] = resolved_video_codec
+    render_pipeline = _resolve_render_pipeline(resolved_video_codec, str(render_defaults["pixel_format"]))
+    filtergraph = _build_filtergraph(cut_plan, input_indexes, render_pipeline=render_pipeline)
+    filtergraph_path.write_text(filtergraph, encoding="utf-8")
     command = [
         "ffmpeg",
         "-i",
         master_path,
     ]
     for path in video_paths:
-        command.extend(["-i", path])
+        command.extend([*render_pipeline["input_args"], "-i", path])
     command.extend(
         [
             "-filter_complex_script",
@@ -167,8 +277,12 @@ def build_render_scaffold(
             "-c:v",
             resolved_video_codec,
             *_video_codec_args(resolved_video_codec),
-            "-pix_fmt",
-            str(render_defaults["pixel_format"]),
+        ]
+    )
+    if render_pipeline["video_path"] != "cuda":
+        command.extend(["-pix_fmt", str(render_pipeline["encoder_pixel_format"])])
+    command.extend(
+        [
             "-c:a",
             str(render_defaults["audio_codec"]),
             "-movflags",
@@ -209,6 +323,7 @@ def build_render_scaffold(
             "path": str(output_path),
             "duration_seconds": cut_plan["timeline"]["output_duration_seconds"],
             "render_defaults": render_defaults,
+            "render_pipeline": render_pipeline,
         },
         "artifacts": {
             "filtergraph_path": str(filtergraph_path),

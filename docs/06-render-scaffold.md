@@ -52,7 +52,7 @@ Pro Video-Segment:
 
 - `trim` auf die berechnete Source-Zeit
 - `setpts` zur Korrektur kleiner Sync-Drift
-- `fps`, `scale`, `pad`, `format` zur Vereinheitlichung
+- `fps`, `scale`/`scale_cuda`, `pad`/`pad_cuda` zur Vereinheitlichung
 
 Pro Audio-Segment:
 
@@ -64,12 +64,28 @@ Danach:
 - Video-Segmente via `concat`
 - Audio-Segmente via `concat`
 
+## CUDA-Renderpfad
+
+Wenn `h264_nvenc` verfuegbar ist, nutzt VAZer jetzt standardmaessig den strikten CUDA-Pfad:
+
+- GPU-Decode pro Video-Input via `-hwaccel cuda -hwaccel_output_format cuda`
+- GPU-Scaling via `scale_cuda`
+- GPU-Padding via `pad_cuda`
+- GPU-Encode via `h264_nvenc`
+
+CPU-Fallback fuer den finalen Render ist aktuell bewusst deaktiviert. Wenn CUDA-Komponenten in `ffmpeg` fehlen, endet der Render mit einem klaren Fehler.
+
+Im Render-Manifest steht der aktive Pfad unter:
+
+- `output.render_pipeline.video_path`
+- `output.render_pipeline.input_args`
+
 Der generierte Command nutzt die dateibasierte ffmpeg-Variante `-/filter_complex`, damit der Filtergraph nicht als ein einziger Kommandozeilenblock im Shell-Command landen muss.
 
 ## Beispiel aus dem Sample
 
 ```text
-[1:v]trim=...,setpts=...,fps=25.000000,scale=3840:2160,...[v1]
+[1:v]trim=...,setpts=...,fps=25.000000,scale_cuda=3840:2160:...:format=nv12,pad_cuda=...[v1]
 [v1]concat=n=1:v=1:a=0[vout]
 [0:a]atrim=...,asetpts=PTS-STARTPTS[a1]
 [a1]concat=n=1:v=0:a=1[aout]
@@ -81,6 +97,7 @@ Der generierte Command nutzt die dateibasierte ffmpeg-Variante `-/filter_complex
 - noch keine Transitionen
 - noch kein Multi-Track-Audio-Mix
 - noch keine Validierung gegen exotische Codec-/Filter-Kombinationen
+- tiefe `trim`-Starts sind weiterhin teuer, weil lange Quellen bis zur ersten benoetigten Stelle dekodiert werden muessen
 
 ## Validierungsstand
 
