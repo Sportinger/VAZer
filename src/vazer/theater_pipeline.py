@@ -7,7 +7,7 @@ from typing import Any
 
 from . import __version__
 from .ai_draft import AIDraftOptions, build_ai_draft_cut_plan
-from .cut_plan import EPSILON, _coverage_window, _merge_video_segments, _require_duration
+from .cut_plan import EPSILON, _coverage_window, _merge_video_segments, _require_duration, _shared_coverage_span
 from .visual_packet import VisualPacketOptions, build_visual_packet
 
 
@@ -65,16 +65,21 @@ def _audio_segments_from_video(video_segments: list[dict[str, Any]], master_path
     ]
 
 
-def _chunk_spans(duration_seconds: float, chunk_seconds: float) -> list[tuple[float, float]]:
+def _chunk_spans(
+    span_start_seconds: float,
+    span_end_seconds: float,
+    chunk_seconds: float,
+) -> list[tuple[float, float]]:
+    duration_seconds = span_end_seconds - span_start_seconds
     if duration_seconds <= EPSILON:
         raise ValueError("Master duration is too small for chunked planning.")
     actual_chunk_seconds = max(60.0, float(chunk_seconds))
     spans: list[tuple[float, float]] = []
-    start_seconds = 0.0
-    while start_seconds < duration_seconds - EPSILON:
-        end_seconds = min(duration_seconds, start_seconds + actual_chunk_seconds)
-        spans.append((start_seconds, end_seconds))
-        start_seconds = end_seconds
+    current_start_seconds = float(span_start_seconds)
+    while current_start_seconds < span_end_seconds - EPSILON:
+        current_end_seconds = min(span_end_seconds, current_start_seconds + actual_chunk_seconds)
+        spans.append((current_start_seconds, current_end_seconds))
+        current_start_seconds = current_end_seconds
     return spans
 
 
@@ -164,8 +169,8 @@ def _merge_chunk_cut_plans(
         },
         "render_defaults": render_defaults,
         "timeline": {
-            "master_span_start_seconds": 0.0,
-            "master_span_end_seconds": master_duration_seconds,
+            "master_span_start_seconds": merged_video_segments[0]["master_start_seconds"],
+            "master_span_end_seconds": merged_video_segments[-1]["master_end_seconds"],
             "output_duration_seconds": merged_video_segments[-1]["output_end_seconds"],
             "segment_count": len(merged_video_segments),
             "kept_intervals": kept_intervals,
@@ -252,13 +257,10 @@ def build_chunked_ai_draft_bundle(
     ]
     if not coverage_windows:
         raise ValueError("sync_map does not contain any synced coverage.")
-    planning_duration_seconds = min(
-        master_duration_seconds,
-        max(float(coverage.overlap_end_seconds) for coverage in coverage_windows),
-    )
-    if planning_duration_seconds <= EPSILON:
-        raise ValueError("No synced camera covers a usable project span.")
-    spans = _chunk_spans(planning_duration_seconds, pipeline_options.chunk_seconds)
+    planning_start_seconds, planning_end_seconds = _shared_coverage_span(coverage_windows)
+    if planning_end_seconds - planning_start_seconds <= EPSILON:
+        raise ValueError("Synced cameras do not share a common planning span.")
+    spans = _chunk_spans(planning_start_seconds, planning_end_seconds, pipeline_options.chunk_seconds)
     total_chunks = max(1, len(spans))
 
     chunk_plans: list[dict[str, Any]] = []

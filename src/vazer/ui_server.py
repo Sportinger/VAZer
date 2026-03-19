@@ -23,7 +23,7 @@ from .analysis import (
     write_analysis_map,
 )
 from .camera_roles import build_camera_role_artifact, infer_camera_role_from_name, write_camera_role_artifact
-from .cut_plan import _coverage_window, _require_duration, write_cut_plan
+from .cut_plan import EPSILON, _coverage_window, _require_duration, _shared_coverage_span, write_cut_plan
 from .cut_review import CutValidationOptions, build_cut_validation_report, repair_cut_plan, write_cut_validation_report
 from .fftools import MediaInfo, probe_media
 from .premiere_xml import export_premiere_xml
@@ -91,6 +91,56 @@ def output_mode_label(value: Any) -> str:
     if normalized == OUTPUT_MODE_PREMIERE_ONLY:
         return "Nur Premiere XML"
     return "MP4 + Premiere XML"
+
+
+def _format_hms(seconds: Any) -> str:
+    total_seconds = max(0, int(round(float(seconds or 0.0))))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _span_payload(start_seconds: float, end_seconds: float) -> dict[str, Any]:
+    bounded_start_seconds = float(start_seconds)
+    bounded_end_seconds = float(end_seconds)
+    return {
+        "start_seconds": bounded_start_seconds,
+        "end_seconds": bounded_end_seconds,
+        "duration_seconds": max(0.0, bounded_end_seconds - bounded_start_seconds),
+        "label": f"{_format_hms(bounded_start_seconds)} - {_format_hms(bounded_end_seconds)}",
+    }
+
+
+def _shared_multicam_span(sync_map: dict[str, Any]) -> dict[str, Any] | None:
+    master_payload = sync_map.get("master")
+    if not isinstance(master_payload, dict):
+        return None
+
+    master_path = master_payload.get("path")
+    if not isinstance(master_path, str) or not master_path:
+        return None
+
+    master_duration_seconds = _require_duration(master_payload, "Master audio", master_path)
+    coverage_windows = [
+        coverage
+        for entry in sync_map.get("entries", [])
+        if isinstance(entry, dict) and entry.get("status") == "synced"
+        if (coverage := _coverage_window(entry, master_duration_seconds)) is not None
+    ]
+    if not coverage_windows:
+        return None
+
+    shared_start_seconds, shared_end_seconds = _shared_coverage_span(coverage_windows)
+    if shared_end_seconds - shared_start_seconds <= EPSILON:
+        return None
+    return _span_payload(shared_start_seconds, shared_end_seconds)
+
+
+def _message_with_multicam_span(message: str, span: dict[str, Any] | None) -> str:
+    if span is None:
+        return message
+    return f"{message} Shared multicam span: {span['label']}."
 
 
 def should_ignore_import_file(path: Path) -> bool:
@@ -850,8 +900,8 @@ INDEX_HTML = """<!doctype html>
     function outputModeLabel(value){return value==="premiere_only"?"Nur Premiere XML":"MP4 + Premiere XML";}
     function renderMetrics(snapshot){const jobs=snapshot?.jobs||[];const projects=snapshot?.projects||[];const running=jobs.filter(job=>["running","pause_requested","paused"].includes(job.status)).length;const completed=jobs.filter(job=>job.status==="completed").length;metricsEl.innerHTML=[["Projekte",projects.length],["Aktiv",running],["Fertig",completed]].map(metric=>`<div class="metric"><small>${metric[0]}</small><strong>${metric[1]}</strong></div>`).join("");}
     function renderUpload(){if(!state.upload){uploadArea.innerHTML="";return;}const upload=state.upload;const progress=upload.totalBytes>0?Math.min(100,Math.round(upload.sentBytes/upload.totalBytes*100)):0;uploadArea.innerHTML=`<div class="card"><div class="row"><strong>Upload laeuft</strong><span class="badge running">${upload.phase}</span></div><div class="progress"><span style="width:${progress}%"></span></div><div class="mini">${upload.message}</div><div class="meta"><div><strong>Dateien</strong>${upload.fileIndex}/${upload.fileCount}</div><div><strong>Fortschritt</strong>${progress}%</div></div></div>`;}
-    function renderJobs(snapshot){const jobs=snapshot?.jobs||[];if(!jobs.length){jobsEl.innerHTML='<div class="muted">Noch keine Jobs. Zieh oben ein paar Clips hinein.</div>';return;}jobsEl.innerHTML=jobs.map(job=>`<div class="card"><div class="row"><strong>${job.project_name}</strong><span class="badge ${job.status}">${job.status.replace("_"," ")}</span></div><div class="progress"><span style="width:${job.progress_percent||0}%"></span></div><div class="mini">${job.stage_label||"wartend"} · ${job.message||"-"}</div><div class="meta"><div><strong>Aktualisiert</strong>${fmtTime(job.updated_at_utc)}</div><div><strong>Fortschritt</strong>${Math.round(job.progress_percent||0)}%</div><div><strong>Master</strong>${job.details?.master_asset||"-"}</div><div><strong>Kameras</strong>${job.details?.camera_count??"-"}</div></div><div class="actions" style="margin-top:12px"><button class="ghost" ${job.status==="running"||job.status==="pause_requested"?"":"disabled"} onclick="pauseJob('${job.id}')">Pause</button><button class="solid" ${job.status==="paused"?"":"disabled"} onclick="resumeJob('${job.id}')">Weiter</button></div></div>`).join("");}
-    function renderProjects(snapshot){const projects=snapshot?.projects||[];if(!projects.length){projectsEl.innerHTML='<div class="muted">Noch keine Projekte im Workspace.</div>';return;}projectsEl.innerHTML=projects.map(project=>{const classification=project.classification||{};const files=(project.files||[]).map(file=>file.original_path).join("<br>");const artifacts=project.artifacts||{};const syncLine=artifacts.sync_map_path?`sync_map: <code>${artifacts.sync_map_path}</code>`:"Noch kein sync_map geschrieben.";const premierePath=artifacts.premiere_xml_path||artifacts.premiere_project_path;const premiereLine=premierePath?`Premiere XML: <code>${premierePath}</code>`:"Noch kein Premiere XML geschrieben.";return `<div class="card"><div class="row"><strong>${project.name}</strong><span class="mini">${fmtTime(project.created_at_utc)}</span></div><div class="meta"><div><strong>Master</strong>${classification.master_asset||"nicht erkannt"}</div><div><strong>Kameras</strong>${classification.camera_count??0}</div><div><strong>Output</strong>${outputModeLabel(project.output_mode)}</div><div><strong>Projekt</strong>${premierePath?"XML bereit":"In Arbeit"}</div></div><div class="mini" style="margin-top:8px">${files}</div><div class="mini" style="margin-top:10px">${syncLine}<br>${premiereLine}</div></div>`;}).join("");}
+    function renderJobs(snapshot){const jobs=snapshot?.jobs||[];if(!jobs.length){jobsEl.innerHTML='<div class="muted">Noch keine Jobs. Zieh oben ein paar Clips hinein.</div>';return;}jobsEl.innerHTML=jobs.map(job=>`<div class="card"><div class="row"><strong>${job.project_name}</strong><span class="badge ${job.status}">${job.status.replace("_"," ")}</span></div><div class="progress"><span style="width:${job.progress_percent||0}%"></span></div><div class="mini">${job.stage_label||"wartend"} · ${job.message||"-"}</div><div class="meta"><div><strong>Aktualisiert</strong>${fmtTime(job.updated_at_utc)}</div><div><strong>Fortschritt</strong>${Math.round(job.progress_percent||0)}%</div><div><strong>Master</strong>${job.details?.master_asset||"-"}</div><div><strong>Kameras</strong>${job.details?.camera_count??"-"}</div><div><strong>Multicam</strong>${job.details?.multicam_span_label||"-"}</div></div><div class="actions" style="margin-top:12px"><button class="ghost" ${job.status==="running"||job.status==="pause_requested"?"":"disabled"} onclick="pauseJob('${job.id}')">Pause</button><button class="solid" ${job.status==="paused"?"":"disabled"} onclick="resumeJob('${job.id}')">Weiter</button></div></div>`).join("");}
+    function renderProjects(snapshot){const projects=snapshot?.projects||[];if(!projects.length){projectsEl.innerHTML='<div class="muted">Noch keine Projekte im Workspace.</div>';return;}projectsEl.innerHTML=projects.map(project=>{const classification=project.classification||{};const files=(project.files||[]).map(file=>file.original_path).join("<br>");const artifacts=project.artifacts||{};const syncLine=artifacts.sync_map_path?`sync_map: <code>${artifacts.sync_map_path}</code>`:"Noch kein sync_map geschrieben.";const premierePath=artifacts.premiere_xml_path||artifacts.premiere_project_path;const premiereLine=premierePath?`Premiere XML: <code>${premierePath}</code>`:"Noch kein Premiere XML geschrieben.";return `<div class="card"><div class="row"><strong>${project.name}</strong><span class="mini">${fmtTime(project.created_at_utc)}</span></div><div class="meta"><div><strong>Master</strong>${classification.master_asset||"nicht erkannt"}</div><div><strong>Kameras</strong>${classification.camera_count??0}</div><div><strong>Output</strong>${outputModeLabel(project.output_mode)}</div><div><strong>Multicam</strong>${project.multicam_span?.label||"-"}</div><div><strong>Projekt</strong>${premierePath?"XML bereit":"In Arbeit"}</div></div><div class="mini" style="margin-top:8px">${files}</div><div class="mini" style="margin-top:10px">${syncLine}<br>${premiereLine}</div></div>`;}).join("");}
     function render(snapshot){state.snapshot=snapshot;workspaceLabel.textContent=snapshot.workspace||"";renderMetrics(snapshot);renderUpload();renderJobs(snapshot);renderProjects(snapshot);}
     async function loadState(){try{render(await fetchJson("/api/state"));}catch(error){console.error(error);}}
     function uploadSingleFile(sessionId,file,index,totalCount,totalBytes,counter){return new Promise((resolve,reject)=>{const path=encodeURIComponent(file.webkitRelativePath||file.name);const xhr=new XMLHttpRequest();xhr.open("POST",`/api/uploads/${sessionId}/files?path=${path}`);xhr.upload.onprogress=(event)=>{if(!state.upload)return;state.upload={...state.upload,phase:"upload",fileIndex:index,fileCount:totalCount,sentBytes:counter.baseBytes+event.loaded,totalBytes,message:`${file.name} wird hochgeladen`};renderUpload();};xhr.onload=()=>{if(xhr.status>=200&&xhr.status<300){counter.baseBytes+=file.size;resolve(JSON.parse(xhr.responseText));return;}reject(new Error(xhr.responseText||`Upload fehlgeschlagen: ${file.name}`));};xhr.onerror=()=>reject(new Error(`Upload fehlgeschlagen: ${file.name}`));xhr.send(file);});}
@@ -1339,6 +1389,7 @@ class UIState:
             "files": files,
             "classification": {},
             "artifacts": {},
+            "multicam_span": None,
             "job_ids": [],
         }
 
@@ -1359,6 +1410,8 @@ class UIState:
                 "camera_count": 0,
                 "master_asset": None,
                 "output_mode": normalized_output_mode,
+                "multicam_span": None,
+                "multicam_span_label": None,
             },
             "artifacts": {},
         }
@@ -1665,12 +1718,30 @@ class UIState:
         project_id: str | None = None
         with self._lock:
             job = self._jobs[job_id]
+            if isinstance(changes.get("details"), dict) and isinstance(job.get("details"), dict):
+                changes["details"] = {
+                    **dict(job.get("details") or {}),
+                    **dict(changes["details"] or {}),
+                }
+            if isinstance(changes.get("artifacts"), dict) and isinstance(job.get("artifacts"), dict):
+                changes["artifacts"] = {
+                    **dict(job.get("artifacts") or {}),
+                    **dict(changes["artifacts"] or {}),
+                }
             job.update(changes)
             job["updated_at_utc"] = _utc_timestamp()
             project_id = str(job.get("project_id") or "") or None
             self._persist_state()
         if project_id:
             self._write_project_manifest(project_id)
+
+    def _set_multicam_span(self, project_id: str, job_id: str, span: dict[str, Any] | None) -> None:
+        self._update_project(project_id, multicam_span=span)
+        details: dict[str, Any] = {
+            "multicam_span": span,
+            "multicam_span_label": None if span is None else span.get("label"),
+        }
+        self._update_job(job_id, details=details)
 
     def _write_project_manifest(self, project_id: str) -> None:
         with self._lock:
@@ -2709,6 +2780,8 @@ class UIState:
                 },
             )
             self._write_project_manifest(project_id)
+            shared_multicam_span = _shared_multicam_span(final_sync_map)
+            self._set_multicam_span(project_id, job_id, shared_multicam_span)
 
             project_root = Path(self._projects[project_id]["root_path"])
             role_overrides = dict(classification.get("camera_roles") or {})
@@ -2881,10 +2954,11 @@ class UIState:
                     job_id,
                     stage="planning",
                     stage_label="AI Schnitt",
-                    message=(
+                    message=_message_with_multicam_span(
                         "Using existing repaired cut plan. Skipping AI draft rebuild."
                         if not reusable_repaired_cut_plan_mutated
-                        else "Using existing repaired cut plan after trimming stale tail segments to valid camera coverage."
+                        else "Using existing repaired cut plan after trimming stale tail segments to valid camera coverage.",
+                        shared_multicam_span,
                     ),
                     progress_percent=82.0,
                     cut_progress={
@@ -2901,10 +2975,11 @@ class UIState:
                     job_id,
                     stage="planning",
                     stage_label="AI Schnitt",
-                    message=(
+                    message=_message_with_multicam_span(
                         "Using existing AI cut plan."
                         if not reusable_ai_cut_plan_mutated
-                        else "Using existing AI cut plan after trimming the stale tail to valid camera coverage."
+                        else "Using existing AI cut plan after trimming the stale tail to valid camera coverage.",
+                        shared_multicam_span,
                     ),
                     progress_percent=82.0,
                     cut_progress={
@@ -2937,7 +3012,10 @@ class UIState:
                     job_id,
                     stage="planning",
                     stage_label="AI Schnitt",
-                    message="Building chunked AI draft for the full theater recording.",
+                    message=_message_with_multicam_span(
+                        "Building chunked AI draft for the full theater recording.",
+                        shared_multicam_span,
+                    ),
                     progress_percent=74.0,
                     cut_progress={
                         "subphase": "draft",
@@ -3211,6 +3289,8 @@ class UIState:
                         "camera_count": classification["camera_count"],
                         "master_asset": classification["master_asset"],
                         "output_mode": output_mode,
+                        "multicam_span": shared_multicam_span,
+                        "multicam_span_label": None if shared_multicam_span is None else shared_multicam_span["label"],
                     },
                 )
                 return
@@ -3280,6 +3360,8 @@ class UIState:
                     "camera_count": classification["camera_count"],
                     "master_asset": classification["master_asset"],
                     "output_mode": output_mode,
+                    "multicam_span": shared_multicam_span,
+                    "multicam_span_label": None if shared_multicam_span is None else shared_multicam_span["label"],
                 },
             )
         except JobCanceledError:

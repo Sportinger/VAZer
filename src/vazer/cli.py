@@ -21,7 +21,7 @@ from .cut_review import (
     write_cut_validation_report,
 )
 from .desktop_app import launch_desktop_app
-from .premiere import export_premiere_project
+from .premiere_xml import export_premiere_multicam_cut_xml, export_premiere_sync_multicam_xml, export_premiere_xml
 from .render import build_render_scaffold, load_cut_plan
 from .sample_set import SampleSetOptions, build_sample_set
 from .sync import SyncOptions, analyze_sync
@@ -362,10 +362,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     premiere_parser = export_subparsers.add_parser(
         "premiere",
-        help="Build a Premiere Pro .prproj from a cut_plan.",
+        help="Build a Premiere-importable XML from a cut_plan and/or sync_map.",
     )
-    premiere_parser.add_argument("--cut-plan", required=True, help="Path to a cut_plan JSON file.")
-    premiere_parser.add_argument("--out", required=True, help="Target .prproj output path.")
+    premiere_parser.add_argument(
+        "--mode",
+        choices=["flat-cut", "sync-multicam", "multicam-cut"],
+        default="flat-cut",
+        help="Export mode: flat-cut (default), sync-multicam (angles only), multicam-cut (angles with cuts).",
+    )
+    premiere_parser.add_argument("--cut-plan", help="Path to a cut_plan JSON file (required for flat-cut and multicam-cut).")
+    premiere_parser.add_argument("--sync-map", help="Path to a sync_map JSON file (required for sync-multicam and multicam-cut).")
+    premiere_parser.add_argument("--out", required=True, help="Target .xml output path.")
     premiere_parser.add_argument("--name", help="Optional project/sequence name override.")
     premiere_parser.add_argument("--json", action="store_true", help="Print the export summary JSON to stdout.")
 
@@ -681,13 +688,23 @@ def _print_render_scaffold_summary(manifest: dict[str, Any]) -> None:
 def _print_premiere_export_summary(summary: dict[str, Any]) -> None:
     output = summary["output"]
     details = summary["summary"]
-    print(f"Premiere project written to: {output['path']}")
-    print(f"Project name: {output['project_name']}")
-    print(
-        f"Assets: {details['video_assets']} video, "
-        f"{details['video_segments']} video segments, "
-        f"{details['audio_segments']} audio segments"
-    )
+    mode = output.get("mode", "flat-cut")
+    print(f"Premiere XML written to: {output['path']}")
+    print(f"Sequence name: {output['project_name']}")
+    print(f"Mode: {mode}")
+    if "angles" in details:
+        print(f"Multicam angles: {details['angles']}")
+    if "video_assets" in details:
+        print(
+            f"Assets: {details['video_assets']} video, "
+            f"{details['video_segments']} video segments, "
+            f"{details['audio_segments']} audio segments"
+        )
+    elif "video_segments" in details:
+        print(
+            f"Segments: {details['video_segments']} video, "
+            f"{details['audio_segments']} audio"
+        )
     print(f"Output duration: {details['duration_seconds']:.3f} s")
 
 
@@ -1028,14 +1045,42 @@ def main() -> int:
         return 0
 
     if args.command == "export" and args.export_command == "premiere":
+        mode = getattr(args, "mode", "flat-cut")
         try:
-            cut_plan = load_cut_plan(args.cut_plan)
-            summary = export_premiere_project(
-                cut_plan,
-                output_project_path=args.out,
-                cut_plan_path=args.cut_plan,
-                project_name=args.name,
-            )
+            if mode == "sync-multicam":
+                if not args.sync_map:
+                    parser.exit(1, "VAZer error: --sync-map is required for sync-multicam mode.\n")
+                sync_map = load_json_artifact(args.sync_map)
+                summary = export_premiere_sync_multicam_xml(
+                    sync_map,
+                    output_xml_path=args.out,
+                    project_name=args.name,
+                )
+            elif mode == "multicam-cut":
+                if not args.sync_map:
+                    parser.exit(1, "VAZer error: --sync-map is required for multicam-cut mode.\n")
+                if not args.cut_plan:
+                    parser.exit(1, "VAZer error: --cut-plan is required for multicam-cut mode.\n")
+                cut_plan = load_cut_plan(args.cut_plan)
+                sync_map = load_json_artifact(args.sync_map)
+                summary = export_premiere_multicam_cut_xml(
+                    cut_plan,
+                    sync_map=sync_map,
+                    output_xml_path=args.out,
+                    cut_plan_path=args.cut_plan,
+                    sync_map_path=args.sync_map,
+                    project_name=args.name,
+                )
+            else:
+                if not args.cut_plan:
+                    parser.exit(1, "VAZer error: --cut-plan is required for flat-cut mode.\n")
+                cut_plan = load_cut_plan(args.cut_plan)
+                summary = export_premiere_xml(
+                    cut_plan,
+                    output_xml_path=args.out,
+                    cut_plan_path=args.cut_plan,
+                    project_name=args.name,
+                )
         except Exception as error:  # pragma: no cover - CLI surface
             parser.exit(1, f"VAZer error: {error}\n")
 

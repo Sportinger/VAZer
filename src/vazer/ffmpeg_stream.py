@@ -14,6 +14,7 @@ from .fftools import probe_media
 from .process_manager import popen_managed, unregister_process
 
 EPSILON = 1e-6
+CUDA_DEVICE_NAME = "vazer_cuda"
 
 
 @dataclass(slots=True)
@@ -22,7 +23,7 @@ class StreamRequest:
     sample_fps: float
     max_width: int
     max_height: int | None = None
-    decoder_preference: str = "auto"
+    decoder_preference: str = "cuda"
     prefer_gpu: bool = True
     prefer_opencv_fallback: bool = True
 
@@ -118,8 +119,8 @@ def _build_ffmpeg_filters(
 
     # Keep the graph conservative: download to CPU frames before scaling.
     hw_filter = (
-        f"hwdownload,format=gray,fps={sample_fps:.8f},"
-        f"scale={target_width}:{target_height}:flags=fast_bilinear,format=gray"
+        f"scale_cuda={target_width}:{target_height}:interp_algo=bilinear:passthrough=0,"
+        f"hwdownload,format=nv12,fps={sample_fps:.8f},format=gray"
     )
     return ["-vf", hw_filter]
 
@@ -140,9 +141,20 @@ def _ffmpeg_command(
         "-nostdin",
     ]
     if hwaccel is not None:
+        if hwaccel == "cuda":
+            args.extend(
+                [
+                    "-init_hw_device",
+                    f"cuda={CUDA_DEVICE_NAME}:0,primary_ctx=1",
+                    "-filter_hw_device",
+                    CUDA_DEVICE_NAME,
+                    "-hwaccel_device",
+                    CUDA_DEVICE_NAME,
+                ]
+            )
         args.extend(["-hwaccel", hwaccel])
         if hwaccel == "cuda":
-            args.extend(["-hwaccel_output_format", "cuda"])
+            args.extend(["-hwaccel_output_format", "cuda", "-extra_hw_frames", "2"])
     args.extend(
         [
             "-i",
@@ -314,7 +326,6 @@ class SequentialGrayFrameReader:
             attempts = [None]
         elif normalized == "cuda":
             attempts = ["cuda"] if "cuda" in hwaccels else []
-            attempts.append(None)
         else:
             if self.request.prefer_gpu:
                 if "cuda" in hwaccels:
@@ -411,7 +422,8 @@ class SequentialGrayFrameReader:
                     raise
                 continue
 
-        if self.request.prefer_opencv_fallback:
+        normalized = str(self.request.decoder_preference or "auto").strip().lower()
+        if self.request.prefer_opencv_fallback and normalized != "cuda":
             iterator, metadata = _opencv_commandless_frames(
                 self.path,
                 sample_fps=self.request.sample_fps,

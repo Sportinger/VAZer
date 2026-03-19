@@ -15,12 +15,14 @@ und fragt damit ein multimodales Modell nach einem ersten theater-spezifischen S
 
 ## Wichtige Einschraenkung
 
-Der aktuelle AI-Draft arbeitet auf der Zeitspanne, die im `visual_packet` steckt.
+Der aktuelle AI-Draft arbeitet auf einer angeforderten Master-Zeitspanne, klemmt diese aber auf den gemeinsamen Sync-Ueberlappungsbereich aller aktiven Kameras.
 
 Das bedeutet:
 
 - fuer kleine Test-Slices oder lokale Teilfenster ist ein einzelner AI-Call sinnvoll
 - fuer eine komplette 1-3h Auffuehrung ist ein einziger Mega-Call nicht die Zielarchitektur
+- der AI-Draft startet nicht mehr zu frueh und endet nicht mehr in einem Kamera-Tail ohne volle Multicam-Abdeckung
+- bei langen Theaterlaeufen ist der sinnvolle Bereich jetzt: erst dort, wo alle Kameras da sind, und Ende kurz bevor die erste Kamera wegfaellt
 
 Der realistischere Weg fuer lange Shows ist:
 
@@ -84,16 +86,17 @@ Das Ergebnis ist direkt ein `vazer.cut_plan.v1` mit zusaetzlichem `ai_draft`-Blo
 
 ## Aktueller Teststand
 
-Der neue Call wurde bereits auf einem kleinen 20s-Testfenster mit Bildern und Transcript erfolgreich ausgefuehrt.
+Der neue Call wurde bereits auf kleinen Testfenstern mit Bildern und Transcript erfolgreich ausgefuehrt.
 
 Das zeigt:
 
 - OpenAI-Call funktioniert
 - Bilder plus Text plus strukturierte Ausgabe funktionieren
 - das Modell kann direkt in ein `cut_plan` kompiliert werden
+- der Draft bleibt jetzt innerhalb der gemeinsamen Multicam-Spanne statt in spaete Coverage-Gaps zu laufen
 
 ## Bewusste Grenzen von v1
 
-- noch keine Chunk-Orchestrierung ueber eine komplette Auffuehrung
+- die Chunk-Orchestrierung fuer lange Shows ist jetzt im Theater-Desktoppfad vorhanden, aber noch nicht als voll frei konfigurierbarer generischer Planer freigelegt
 - noch keine automatische AI-Re-Planung nur fuer Problemcuts
 - noch kein Prompt-Caching oder Kostensteuerung ueber groessere Batches

@@ -54,6 +54,25 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
     PREVIEW_MAX_WIDTH = 1280
     PREVIEW_MAX_HEIGHT = 720
 
+    def _format_hms(seconds: Any) -> str:
+        total_seconds = max(0, int(round(float(seconds or 0.0))))
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def _span_label(span: Any) -> str | None:
+        if not isinstance(span, dict):
+            return None
+        label = span.get("label")
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+        start_seconds = span.get("start_seconds")
+        end_seconds = span.get("end_seconds")
+        if not isinstance(start_seconds, (int, float)) or not isinstance(end_seconds, (int, float)):
+            return None
+        return f"{_format_hms(start_seconds)} - {_format_hms(end_seconds)}"
+
     PIPELINE_PHASES = [
         {"id": "probe", "symbol": "ING", "label": "Import", "detail": "Probe"},
         {"id": "classify", "symbol": "SET", "label": "Setup", "detail": "Master + Cams"},
@@ -1035,11 +1054,15 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 classification = active_project.get("classification") or {}
                 file_count = len(active_project.get("files") or [])
                 output_mode_label = self._output_mode_label(active_project.get("output_mode"))
+                multicam_span_label = self._multicam_span_label(active_project, active_job)
                 if isinstance(classification, dict) and classification.get("warnings"):
                     warning_text = " | ".join(str(item) for item in classification["warnings"])
-                    self.file_meta.setText(f"{file_count} Datei(en) im Lauf. Output: {output_mode_label}. {warning_text}")
+                    meta_text = f"{file_count} Datei(en) im Lauf. Output: {output_mode_label}. {warning_text}"
                 else:
-                    self.file_meta.setText(f"{file_count} Datei(en) im aktuellen Lauf. Output: {output_mode_label}.")
+                    meta_text = f"{file_count} Datei(en) im aktuellen Lauf. Output: {output_mode_label}."
+                if multicam_span_label:
+                    meta_text = f"{meta_text} Multicam: {multicam_span_label}."
+                self.file_meta.setText(meta_text)
             else:
                 self.refresh_file_list(preserve_selection=True)
                 meta_text = (
@@ -1389,6 +1412,26 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             if str(value or "") == OUTPUT_MODE_PREMIERE_ONLY:
                 return "Nur Premiere XML"
             return "MP4 + Premiere XML"
+
+        def _multicam_span_label(
+            self,
+            active_project: dict[str, Any] | None,
+            active_job: dict[str, Any] | None = None,
+        ) -> str | None:
+            if isinstance(active_project, dict):
+                label = _span_label(active_project.get("multicam_span"))
+                if label:
+                    return label
+            if isinstance(active_job, dict):
+                details = active_job.get("details")
+                if isinstance(details, dict):
+                    direct = details.get("multicam_span_label")
+                    if isinstance(direct, str) and direct.strip():
+                        return direct.strip()
+                    label = _span_label(details.get("multicam_span"))
+                    if label:
+                        return label
+            return None
 
         def _staged_paths_signature(self) -> tuple[str, ...]:
             return tuple(sorted(str(file_info.get("stored_path") or "") for file_info in self.staged_files))

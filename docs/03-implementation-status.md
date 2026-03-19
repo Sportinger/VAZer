@@ -23,7 +23,10 @@ Update vom 2026-03-19:
 - starke Kurzclips duerfen notfalls mit genau einem sehr starken Anchor validieren statt pauschal zu scheitern
 - Desktop zeigt jetzt pro Datei farbige Fortschrittsbalken
 - Transcript und CV koennen im Desktop-Lauf parallel zum Media-Block anlaufen
-- das Zielbild fuer einen schnellen Analysepfad ist jetzt separat dokumentiert: sequential low-res global pass, lokaler Dense-Pass an Cut-Kandidaten, GPU-Option mit CPU-Fallback und bessere Schärfe-/Bewegungsmetriken
+- der Theater-Draft plant jetzt auf der gemeinsamen Multicam-Ueberlappung aller Kameras statt in einzelne Tail-Bereiche ohne volle Abdeckung zu laufen
+- Desktop und Web-UI zeigen diese gemeinsame Multicam-Spanne jetzt sichtbar an
+- der lokale Dense-Pass fuer Cut-Checks laeuft jetzt strikt ueber CUDA und bricht klar mit Fehler ab, statt still auf CPU/OpenCV auszuweichen
+- der Premiere-Export schreibt jetzt `*.premiere.xml` statt experimentell direkt ein `.prproj` zu erzeugen
 
 Warum Python fuer diesen Start:
 
@@ -83,6 +86,7 @@ Aktueller Produktscope:
 - die drei Theater-Kamerarollen in einem OpenAI-Call aus Mittelframes klassifizieren
 - den Desktop-Lauf vor dem Sync anhalten, Rollen anzeigen und per `Weiter` / `Abbrechen` freigeben
 - den Desktop-Lauf ueber Transcript, Analyse, chunked AI-Draft, Validate/Repair bis zum finalen Render durchziehen
+- Premiere-importierbares XML direkt aus dem reparierten `cut_plan` schreiben
 
 ## Smoke-Test mit den Beispiel-Dateien
 
@@ -216,5 +220,5 @@ python -m vazer analyze roles --sync-map .\artifacts\sync_map.json --out .\artif
 - Packaging der Desktop-App zu einer echten `.exe`
 - spaeter piecewise Sync fuer Clips, bei denen auch der Rescue-Pfad nicht reicht
 - die neue schnelle Analyse-Pipeline ist jetzt im Kern da:
-  globaler sequentieller Low-Res-Pass mit FFmpeg/GPU-Praeferenz, lokaler Dense-Pass fuer Cut-Checks und OpenCV-Fallback
+  globaler sequentieller Low-Res-Pass plus strikter CUDA-Lokalpass fuer Cut-Checks
 - dichtere CV-Signale wie Face-Presence, Shot-Boundaries und Framing

@@ -20,6 +20,7 @@ from .cut_plan import (
     _extract_master_speech_segments,
     _merge_video_segments,
     _require_duration,
+    _shared_coverage_span,
     _speech_overlap_summary,
     _transcript_excerpt,
 )
@@ -120,10 +121,6 @@ def _coverage_by_asset(sync_map: dict[str, Any], master_duration_seconds: float)
     if not coverages:
         raise ValueError("sync_map does not contain any synced coverage.")
     return coverages
-
-
-def _max_coverage_end_seconds(coverages_by_asset: dict[str, Any]) -> float:
-    return max(float(coverage.overlap_end_seconds) for coverage in coverages_by_asset.values())
 
 
 def _fallback_asset_id(
@@ -477,8 +474,9 @@ def build_ai_draft_cut_plan(
     master_duration_seconds = _require_duration(master_payload, "Master audio", master_path)
     coverages_by_asset = _coverage_by_asset(sync_map, master_duration_seconds)
     span_start_seconds, span_end_seconds = _span_from_visual_packet(visual_packet, ai_options)
-    max_coverage_end_seconds = _max_coverage_end_seconds(coverages_by_asset)
-    span_end_seconds = min(span_end_seconds, max_coverage_end_seconds)
+    shared_start_seconds, shared_end_seconds = _shared_coverage_span(list(coverages_by_asset.values()))
+    span_start_seconds = max(span_start_seconds, shared_start_seconds)
+    span_end_seconds = min(span_end_seconds, shared_end_seconds)
     if span_end_seconds - span_start_seconds <= EPSILON:
         raise ValueError(
             "No synced camera covers requested AI planning span "

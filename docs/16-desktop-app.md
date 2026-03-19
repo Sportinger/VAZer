@@ -18,6 +18,7 @@ Der aktuelle Minimalstand:
 - eine Phasenleiste oben fuer den gesamten Theater-VAZ-Flow
 - die Phasen-Badges laufen von unten nach oben voll statt eines klassischen Prozentbalkens
 - die Analyse-Phase kann optional `Global` und `Local` getrennt beschriften, wenn der Job das hergibt
+- die Dateiliste zeigt fuer laufende Projekte jetzt auch die gemeinsame Multicam-Spanne
 - Rollen-Review-Stopp vor dem Sync
 - Transcript und technische Analyse laufen jetzt parallel zum Sync-/Media-Block
 - Hintergrundjob laeuft jetzt bis zum geschnittenen FHD-Render durch
@@ -80,9 +81,13 @@ Der Desktop-Job macht bisher:
 8. billige technische Analyse rechnen
    - die UI akzeptiert spaeter optional `analysis_pass=global|local` fuer klarere Beschriftung
    - pro Datei koennen mehrere kleine Fortschrittsbalken als `ui_sub_progress` erscheinen
-9. chunked AI-Draft ueber die ganze Show bauen
+9. chunked AI-Draft ueber die gemeinsame Multicam-Spanne bauen
+   - Start erst, wenn alle synced Kameras da sind
+   - Ende kurz bevor die erste Kamera wegfaellt
 10. Cuts validieren und lokal reparieren
-11. FHD-Render ausgeben
+   - der lokale Dense-Pass laeuft jetzt strikt auf CUDA und faellt nicht mehr still auf CPU zurueck
+11. Premiere XML schreiben
+12. optional FHD-Render ausgeben
 
 Artefakte:
 
@@ -99,6 +104,11 @@ Artefakte:
 - `VAZer\output\*.premiere.xml`
 - `VAZer\output\*.mp4`
 - `VAZer\vazer.state.json` als Start-/Resume-Hinweis fuer den letzten bekannten Zustand
+
+Die Status-/Projektanzeige zeigt dabei jetzt zusaetzlich:
+
+- die gemeinsame Multicam-Spanne als `HH:MM:SS - HH:MM:SS`
+- bei AI-Schnitt-Logs denselben Bereich auch im Server-Jobtext
 
 ## Was noch fehlt
 

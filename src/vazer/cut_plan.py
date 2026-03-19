@@ -138,6 +138,43 @@ def _candidate_score(window: CoverageWindow) -> tuple[float, float, float, float
     )
 
 
+def _shared_coverage_span(coverage_windows: list[CoverageWindow]) -> tuple[float, float]:
+    if not coverage_windows:
+        raise ValueError("At least one coverage window is required.")
+    start_seconds = max(float(window.overlap_start_seconds) for window in coverage_windows)
+    end_seconds = min(float(window.overlap_end_seconds) for window in coverage_windows)
+    return start_seconds, end_seconds
+
+
+def _continuous_coverage_end_seconds(
+    coverage_windows: list[CoverageWindow],
+    start_seconds: float = 0.0,
+) -> float:
+    current_end_seconds = float(start_seconds)
+    intervals = sorted(
+        (
+            max(float(window.overlap_start_seconds), current_end_seconds),
+            float(window.overlap_end_seconds),
+        )
+        for window in coverage_windows
+        if float(window.overlap_end_seconds) > current_end_seconds + EPSILON
+    )
+    if not intervals:
+        return current_end_seconds
+
+    advanced = True
+    while advanced:
+        advanced = False
+        for interval_start_seconds, interval_end_seconds in intervals:
+            if interval_end_seconds <= current_end_seconds + EPSILON:
+                continue
+            if interval_start_seconds > current_end_seconds + EPSILON:
+                continue
+            current_end_seconds = max(current_end_seconds, interval_end_seconds)
+            advanced = True
+    return current_end_seconds
+
+
 def _interval_overlap(start_seconds: float, end_seconds: float, interval_start_seconds: float, interval_end_seconds: float) -> float:
     return max(0.0, min(end_seconds, interval_end_seconds) - max(start_seconds, interval_start_seconds))
 
@@ -453,6 +490,9 @@ def build_baseline_cut_plan(
     ]
     if not coverage_windows:
         raise ValueError("No synced entry overlaps the master timeline.")
+    shared_start_seconds, shared_end_seconds = _shared_coverage_span(coverage_windows)
+    if shared_end_seconds - shared_start_seconds <= EPSILON:
+        raise ValueError("Synced cameras do not share a common overlap span.")
 
     boundary_candidates = {
         round(coverage.overlap_start_seconds, 6)
@@ -474,7 +514,13 @@ def build_baseline_cut_plan(
         for window in windows:
             boundary_candidates.add(round(float(window["master_start_seconds"]), 6))
             boundary_candidates.add(round(float(window["master_end_seconds"]), 6))
-    boundaries = sorted(boundary_candidates)
+    boundary_candidates.add(round(shared_start_seconds, 6))
+    boundary_candidates.add(round(shared_end_seconds, 6))
+    boundaries = sorted(
+        boundary
+        for boundary in boundary_candidates
+        if shared_start_seconds - EPSILON <= boundary <= shared_end_seconds + EPSILON
+    )
 
     initial_segments: list[dict[str, Any]] = []
     output_cursor = 0.0

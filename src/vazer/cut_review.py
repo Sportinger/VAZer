@@ -26,7 +26,7 @@ class CutValidationOptions:
     local_dense_context_seconds: float = 2.0
     local_dense_fps: float = 8.0
     local_dense_width: int = 640
-    local_dense_decoder_preference: str = "auto"
+    local_dense_decoder_preference: str = "cuda"
     local_dense_prefer_gpu: bool = True
     analysis_soft_threshold: float = 0.35
     analysis_fail_threshold: float = 0.2

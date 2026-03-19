@@ -18,6 +18,7 @@ from .fftools import decode_audio, probe_media
 from .process_manager import popen_managed, unregister_process
 
 EPSILON = 1e-6
+CUDA_DEVICE_NAME = "vazer_cuda"
 
 
 @dataclass(slots=True)
@@ -29,7 +30,7 @@ class AnalysisOptions:
     video_sample_interval_seconds: float = 1.0
     video_window_seconds: float = 4.0
     analysis_width: int = 480
-    decoder_preference: str = "auto"
+    decoder_preference: str = "cuda"
     prefer_gpu: bool = True
     block_grid_size: int = 4
     block_highlight_ratio: float = 0.35
@@ -188,10 +189,10 @@ def _hwaccel_ladder(decoder_preference: str, prefer_gpu: bool) -> list[tuple[str
     if normalized == "cpu":
         return [("ffmpeg_cpu", [])]
     if normalized == "cuda":
-        return [("ffmpeg_cuda", ["-hwaccel", "cuda"]), ("ffmpeg_cpu", [])]
+        return [("ffmpeg_cuda", ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-extra_hw_frames", "2"])]
     if prefer_gpu:
         return [
-            ("ffmpeg_cuda", ["-hwaccel", "cuda"]),
+            ("ffmpeg_cuda", ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-extra_hw_frames", "2"]),
             ("ffmpeg_auto", ["-hwaccel", "auto"]),
             ("ffmpeg_cpu", []),
         ]
@@ -209,16 +210,41 @@ def _build_ffmpeg_gray_command(
     hwaccel_args: list[str],
 ) -> list[str]:
     sample_fps = 1.0 / max(sample_interval_seconds, 1e-6)
-    filters = [
-        f"fps={sample_fps:.8f}",
-        f"scale={target_width}:{target_height}:flags=fast_bilinear",
-        "format=gray",
-    ]
+    use_cuda = any(str(arg).strip().lower() == "cuda" for arg in hwaccel_args)
+    if use_cuda:
+        filters = [
+            f"scale_cuda={target_width}:{target_height}:interp_algo=bilinear:passthrough=0",
+            "hwdownload",
+            "format=nv12",
+            f"fps={sample_fps:.8f}",
+            "format=gray",
+        ]
+    else:
+        filters = [
+            f"fps={sample_fps:.8f}",
+            f"scale={target_width}:{target_height}:flags=fast_bilinear",
+            "format=gray",
+        ]
     return [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
+        "-nostdin",
+        "-threads",
+        "1",
+        *(
+            [
+                "-init_hw_device",
+                f"cuda={CUDA_DEVICE_NAME}:0,primary_ctx=1",
+                "-filter_hw_device",
+                CUDA_DEVICE_NAME,
+                "-hwaccel_device",
+                CUDA_DEVICE_NAME,
+            ]
+            if use_cuda
+            else []
+        ),
         *hwaccel_args,
         "-ss",
         f"{start_seconds:.6f}",
@@ -226,6 +252,9 @@ def _build_ffmpeg_gray_command(
         f"{duration_seconds:.6f}",
         "-i",
         path,
+        "-an",
+        "-sn",
+        "-dn",
         "-vf",
         ",".join(filters),
         "-vsync",
@@ -245,7 +274,7 @@ def _iter_ffmpeg_sampled_frames(
     *,
     start_seconds: float = 0.0,
     duration_seconds: float | None = None,
-    decoder_preference: str = "auto",
+    decoder_preference: str = "cuda",
     prefer_gpu: bool = True,
     on_progress: Any | None = None,
 ) -> tuple[list[tuple[float, np.ndarray]], dict[str, Any]]:
@@ -444,10 +473,22 @@ def _iter_sampled_frames(
     *,
     start_seconds: float = 0.0,
     duration_seconds: float | None = None,
-    decoder_preference: str = "auto",
+    decoder_preference: str = "cuda",
     prefer_gpu: bool = True,
     on_progress: Any | None = None,
 ) -> tuple[list[tuple[float, np.ndarray]], dict[str, Any]]:
+    normalized = str(decoder_preference or "auto").strip().lower()
+    if normalized == "cuda":
+        return _iter_ffmpeg_sampled_frames(
+            path,
+            width,
+            sample_interval_seconds,
+            start_seconds=start_seconds,
+            duration_seconds=duration_seconds,
+            decoder_preference=decoder_preference,
+            prefer_gpu=prefer_gpu,
+            on_progress=on_progress,
+        )
     try:
         return _iter_ffmpeg_sampled_frames(
             path,
@@ -789,7 +830,7 @@ def analyze_local_dense_window(
     context_seconds: float,
     width: int,
     sample_fps: float,
-    decoder_preference: str = "auto",
+    decoder_preference: str = "cuda",
     prefer_gpu: bool = True,
     options: AnalysisOptions | None = None,
 ) -> dict[str, Any]:
