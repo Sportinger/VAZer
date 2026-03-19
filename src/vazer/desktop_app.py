@@ -673,7 +673,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return
 
             if active_project is not None:
-                self.refresh_file_list(files=active_project.get("files") or [])
+                self.refresh_file_list(files=active_project.get("files") or [], preserve_selection=True)
                 classification = active_project.get("classification") or {}
                 file_count = len(active_project.get("files") or [])
                 if isinstance(classification, dict) and classification.get("warnings"):
