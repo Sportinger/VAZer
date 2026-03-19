@@ -212,6 +212,7 @@ def build_chunked_ai_draft_bundle(
     role_overrides: dict[str, str] | None = None,
     output_dir: str,
     options: TheaterPipelineOptions | None = None,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     if sync_map.get("schema_version") != "vazer.sync_map.v1":
         raise ValueError("Unsupported sync_map schema version.")
@@ -244,9 +245,12 @@ def build_chunked_ai_draft_bundle(
     master_path = master_payload["path"]
     master_duration_seconds = _require_duration(master_payload, "Master audio", master_path)
     spans = _chunk_spans(master_duration_seconds, pipeline_options.chunk_seconds)
+    total_chunks = max(1, len(spans))
 
     chunk_plans: list[dict[str, Any]] = []
     for chunk_index, (chunk_start_seconds, chunk_end_seconds) in enumerate(spans, start=1):
+        if callable(on_progress):
+            on_progress(chunk_index - 1, total_chunks, f"KI-Chunk {chunk_index}/{total_chunks}")
         chunk_cut_plan = build_ai_draft_cut_plan(
             sync_map,
             source_sync_map_path=source_sync_map_path,
@@ -271,6 +275,8 @@ def build_chunked_ai_draft_bundle(
             "master_end_seconds": chunk_end_seconds,
         }
         chunk_plans.append(chunk_cut_plan)
+        if callable(on_progress):
+            on_progress(chunk_index, total_chunks, f"KI-Chunk {chunk_index}/{total_chunks}")
 
     combined_cut_plan = _merge_chunk_cut_plans(
         chunk_plans=chunk_plans,
@@ -281,6 +287,8 @@ def build_chunked_ai_draft_bundle(
         source_transcript_path=source_transcript_path,
         options=pipeline_options,
     )
+    if callable(on_progress):
+        on_progress(total_chunks, total_chunks, "Chunks zusammengefuehrt")
     return {
         "visual_packet": visual_packet,
         "chunk_plans": chunk_plans,

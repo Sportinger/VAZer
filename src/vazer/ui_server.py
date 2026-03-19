@@ -2573,14 +2573,45 @@ class UIState:
                     stage_label="AI Schnitt",
                     message="Using existing AI cut plan.",
                     progress_percent=82.0,
+                    cut_progress={
+                        "subphase": "draft",
+                        "label": "Reuse",
+                        "current": 1,
+                        "total": 1,
+                        "percent": 100.0,
+                    },
                 )
             else:
+                def _planning_progress(completed_chunks: int, total_chunks: int, detail: str) -> None:
+                    chunk_progress = 100.0 * completed_chunks / max(1, total_chunks)
+                    self._update_job(
+                        job_id,
+                        stage="planning",
+                        stage_label="AI Schnitt",
+                        message=detail,
+                        progress_percent=74.0 + 8.0 * (chunk_progress / 100.0),
+                        cut_progress={
+                            "subphase": "draft",
+                            "label": "KI",
+                            "current": completed_chunks,
+                            "total": total_chunks,
+                            "percent": chunk_progress,
+                        },
+                    )
+
                 self._update_job(
                     job_id,
                     stage="planning",
                     stage_label="AI Schnitt",
                     message="Building chunked AI draft for the full theater recording.",
                     progress_percent=74.0,
+                    cut_progress={
+                        "subphase": "draft",
+                        "label": "KI",
+                        "current": 0,
+                        "total": 0,
+                        "percent": 0.0,
+                    },
                 )
                 draft_bundle = build_chunked_ai_draft_bundle(
                     final_sync_map,
@@ -2592,6 +2623,7 @@ class UIState:
                     role_overrides=role_overrides,
                     output_dir=str(planning_root),
                     options=TheaterPipelineOptions(),
+                    on_progress=_planning_progress,
                 )
                 write_visual_packet(draft_bundle["visual_packet"], str(visual_packet_path))
                 for chunk_index, chunk_plan in enumerate(draft_bundle["chunk_plans"], start=1):
@@ -2624,6 +2656,13 @@ class UIState:
                     message=detail,
                     progress_percent=82.0 + 4.0 * (local_progress / 100.0),
                     analysis_pass="local",
+                    cut_progress={
+                        "subphase": "validate",
+                        "label": "Check",
+                        "current": completed,
+                        "total": total,
+                        "percent": local_progress,
+                    },
                 )
 
             if reusable_validation_report is not None:
@@ -2635,6 +2674,13 @@ class UIState:
                     message="Using existing cut validation.",
                     progress_percent=86.0,
                     analysis_pass="local",
+                    cut_progress={
+                        "subphase": "validate",
+                        "label": "Reuse",
+                        "current": 1,
+                        "total": 1,
+                        "percent": 100.0,
+                    },
                 )
             else:
                 self._update_job(
@@ -2644,6 +2690,13 @@ class UIState:
                     message="Validating proposed cut points.",
                     progress_percent=82.0,
                     analysis_pass="local",
+                    cut_progress={
+                        "subphase": "validate",
+                        "label": "Check",
+                        "current": 0,
+                        "total": 0,
+                        "percent": 0.0,
+                    },
                 )
                 validation_report = build_cut_validation_report(
                     ai_cut_plan,
@@ -2676,6 +2729,13 @@ class UIState:
                     stage_label="Cuts reparieren",
                     message="Using existing repaired cut plan.",
                     progress_percent=89.0,
+                    cut_progress={
+                        "subphase": "repair",
+                        "label": "Reuse",
+                        "current": 1,
+                        "total": 1,
+                        "percent": 100.0,
+                    },
                 )
             else:
                 self._update_job(
@@ -2684,6 +2744,13 @@ class UIState:
                     stage_label="Cuts reparieren",
                     message="Applying deterministic local cut repairs.",
                     progress_percent=86.0,
+                    cut_progress={
+                        "subphase": "repair",
+                        "label": "Repair",
+                        "current": 0,
+                        "total": 1,
+                        "percent": 0.0,
+                    },
                 )
                 repaired_cut_plan = repair_cut_plan(
                     ai_cut_plan,
@@ -2698,6 +2765,20 @@ class UIState:
                 write_cut_plan(repaired_cut_plan, str(repaired_cut_plan_path))
                 render_ready_cut_plan = apply_max_render_size(repaired_cut_plan, max_width=1920, max_height=1080)
                 write_cut_plan(render_ready_cut_plan, str(render_ready_cut_plan_path))
+                self._update_job(
+                    job_id,
+                    stage="repair",
+                    stage_label="Cuts reparieren",
+                    message="Repair abgeschlossen, Render-Fassung vorbereitet.",
+                    progress_percent=89.0,
+                    cut_progress={
+                        "subphase": "repair",
+                        "label": "Repair",
+                        "current": 1,
+                        "total": 1,
+                        "percent": 100.0,
+                    },
+                )
             self._update_project(
                 project_id,
                 artifacts={

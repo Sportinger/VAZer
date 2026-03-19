@@ -1349,6 +1349,42 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         def _analysis_status_suffix(self, active_job: dict[str, Any] | None) -> str | None:
             return self._analysis_stage_detail(active_job)
 
+        def _cut_stage_detail(
+            self,
+            active_job: dict[str, Any] | None,
+            existing_run: dict[str, Any] | None = None,
+        ) -> str | None:
+            if active_job is not None:
+                cut_progress = active_job.get("cut_progress")
+                if isinstance(cut_progress, dict):
+                    label = str(cut_progress.get("label") or "").strip()
+                    subphase = str(cut_progress.get("subphase") or "").strip().lower()
+                    current = cut_progress.get("current")
+                    total = cut_progress.get("total")
+                    if isinstance(total, (int, float)) and int(total) > 1 and isinstance(current, (int, float)):
+                        return f"{label or subphase.title()} {int(current)}/{int(total)}"
+                    if label:
+                        return label
+
+                stage = str(active_job.get("stage") or "").strip().lower()
+                if stage == "planning":
+                    return "KI-Draft"
+                if stage == "validate":
+                    return "Check"
+                if stage == "repair":
+                    return "Repair"
+
+            if existing_run is not None:
+                artifact_flags = existing_run.get("artifact_flags") or {}
+                if artifact_flags.get("render_cut") or artifact_flags.get("repair"):
+                    return "Draft + Repair"
+                if artifact_flags.get("validation"):
+                    return "Check"
+                if artifact_flags.get("planning"):
+                    return "KI-Draft"
+
+            return None
+
         def _output_mode_label(self, value: Any) -> str:
             if str(value or "") == OUTPUT_MODE_PREMIERE_ONLY:
                 return "Nur Premiere XML"
@@ -1424,6 +1460,10 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 if widget_info["id"] == "analysis":
                     widget_info["detail"].setText(
                         self._analysis_stage_detail(active_job) or widget_info["default_detail"]
+                    )
+                elif widget_info["id"] == "cut":
+                    widget_info["detail"].setText(
+                        self._cut_stage_detail(active_job, existing_run) or widget_info["default_detail"]
                     )
                 elif widget_info["detail"].text() != widget_info["default_detail"]:
                     widget_info["detail"].setText(widget_info["default_detail"])
