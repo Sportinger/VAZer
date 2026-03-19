@@ -13,6 +13,7 @@ Der aktuelle Minimalstand:
 - eine reduzierte Dateiliste plus Preview
 - Mittelframe-Preview pro gewaehlter Datei
 - per-Datei Fortschrittsbalken, inklusive optionaler Unterfortschritte
+- ein echter `Pause` / `Weiter`-Flow im Desktop
 - ein minimaler `VAZ`-Startbutton
 - eine Phasenleiste oben fuer den gesamten Theater-VAZ-Flow
 - die Phasen-Badges laufen von unten nach oben voll statt eines klassischen Prozentbalkens
@@ -20,6 +21,7 @@ Der aktuelle Minimalstand:
 - Rollen-Review-Stopp vor dem Sync
 - Transcript und technische Analyse laufen jetzt parallel zum Sync-/Media-Block
 - Hintergrundjob laeuft jetzt bis zum geschnittenen FHD-Render durch
+- pausierte Laeufe koennen nach einem App-Neustart aus vorhandenen Artefakten als neuer Job wieder aufgenommen werden
 
 ## Start
 
@@ -91,7 +93,7 @@ Artefakte:
 - `VAZer\artifacts\vazer.cut_plan.ai.json`
 - `VAZer\artifacts\vazer.cut_validation.json`
 - `VAZer\artifacts\vazer.cut_plan.repaired.json`
-- `VAZer\output\*.prproj`
+- `VAZer\output\*.premiere.xml`
 - `VAZer\output\*.mp4`
 - `VAZer\vazer.state.json` als Start-/Resume-Hinweis fuer den letzten bekannten Zustand
 

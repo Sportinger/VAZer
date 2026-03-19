@@ -26,7 +26,7 @@ from .camera_roles import build_camera_role_artifact, infer_camera_role_from_nam
 from .cut_plan import write_cut_plan
 from .cut_review import CutValidationOptions, build_cut_validation_report, repair_cut_plan, write_cut_validation_report
 from .fftools import MediaInfo, probe_media
-from .premiere import export_premiere_project
+from .premiere_xml import export_premiere_xml
 from .process_manager import terminate_registered_processes
 from .render import apply_max_render_size, build_render_scaffold, run_render
 from .sync import SyncOptions, analyze_sync
@@ -68,14 +68,19 @@ def normalize_output_mode(value: Any) -> str:
         "both",
         "render+premiere",
         "mp4+premiere",
+        "render+xml",
+        "mp4+xml",
     }:
         return OUTPUT_MODE_RENDER_AND_PREMIERE
     if normalized in {
         OUTPUT_MODE_PREMIERE_ONLY,
         "premiere",
+        "xml",
+        "premiere_xml",
         "prproj",
         "premiere_project",
         "prproj_only",
+        "xml_only",
     }:
         return OUTPUT_MODE_PREMIERE_ONLY
     raise ValueError(f"Unknown output mode: {value}")
@@ -84,8 +89,8 @@ def normalize_output_mode(value: Any) -> str:
 def output_mode_label(value: Any) -> str:
     normalized = normalize_output_mode(value)
     if normalized == OUTPUT_MODE_PREMIERE_ONLY:
-        return "Nur Premiere-Projekt"
-    return "MP4 + Premiere-Projekt"
+        return "Nur Premiere XML"
+    return "MP4 + Premiere XML"
 
 
 def should_ignore_import_file(path: Path) -> bool:
@@ -362,7 +367,7 @@ INDEX_HTML = """<!doctype html>
         <div class="actions" style="margin-top:14px">
           <button class="solid" id="pickButton" type="button">Dateien auswaehlen</button>
           <button class="ghost" id="refreshButton" type="button">Status aktualisieren</button>
-          <label class="modeControl" for="outputMode"><span>Output</span><select id="outputMode"><option value="render_and_premiere">MP4 + Premiere</option><option value="premiere_only">Nur Premiere</option></select></label>
+          <label class="modeControl" for="outputMode"><span>Output</span><select id="outputMode"><option value="render_and_premiere">MP4 + Premiere XML</option><option value="premiere_only">Nur Premiere XML</option></select></label>
         </div>
       </div>
     </section>
@@ -393,11 +398,11 @@ INDEX_HTML = """<!doctype html>
 
     async function fetchJson(url,options={}){const response=await fetch(url,options);const payload=await response.json().catch(()=>({error:response.statusText}));if(!response.ok)throw new Error(payload.error||response.statusText);return payload;}
     function fmtTime(value){return value?new Date(value).toLocaleString("de-DE"):"-";}
-    function outputModeLabel(value){return value==="premiere_only"?"Nur Premiere-Projekt":"MP4 + Premiere-Projekt";}
+    function outputModeLabel(value){return value==="premiere_only"?"Nur Premiere XML":"MP4 + Premiere XML";}
     function renderMetrics(snapshot){const jobs=snapshot?.jobs||[];const projects=snapshot?.projects||[];const running=jobs.filter(job=>["running","pause_requested","paused"].includes(job.status)).length;const completed=jobs.filter(job=>job.status==="completed").length;metricsEl.innerHTML=[["Projekte",projects.length],["Aktiv",running],["Fertig",completed]].map(metric=>`<div class="metric"><small>${metric[0]}</small><strong>${metric[1]}</strong></div>`).join("");}
     function renderUpload(){if(!state.upload){uploadArea.innerHTML="";return;}const upload=state.upload;const progress=upload.totalBytes>0?Math.min(100,Math.round(upload.sentBytes/upload.totalBytes*100)):0;uploadArea.innerHTML=`<div class="card"><div class="row"><strong>Upload laeuft</strong><span class="badge running">${upload.phase}</span></div><div class="progress"><span style="width:${progress}%"></span></div><div class="mini">${upload.message}</div><div class="meta"><div><strong>Dateien</strong>${upload.fileIndex}/${upload.fileCount}</div><div><strong>Fortschritt</strong>${progress}%</div></div></div>`;}
     function renderJobs(snapshot){const jobs=snapshot?.jobs||[];if(!jobs.length){jobsEl.innerHTML='<div class="muted">Noch keine Jobs. Zieh oben ein paar Clips hinein.</div>';return;}jobsEl.innerHTML=jobs.map(job=>`<div class="card"><div class="row"><strong>${job.project_name}</strong><span class="badge ${job.status}">${job.status.replace("_"," ")}</span></div><div class="progress"><span style="width:${job.progress_percent||0}%"></span></div><div class="mini">${job.stage_label||"wartend"} · ${job.message||"-"}</div><div class="meta"><div><strong>Aktualisiert</strong>${fmtTime(job.updated_at_utc)}</div><div><strong>Fortschritt</strong>${Math.round(job.progress_percent||0)}%</div><div><strong>Master</strong>${job.details?.master_asset||"-"}</div><div><strong>Kameras</strong>${job.details?.camera_count??"-"}</div></div><div class="actions" style="margin-top:12px"><button class="ghost" ${job.status==="running"||job.status==="pause_requested"?"":"disabled"} onclick="pauseJob('${job.id}')">Pause</button><button class="solid" ${job.status==="paused"?"":"disabled"} onclick="resumeJob('${job.id}')">Weiter</button></div></div>`).join("");}
-    function renderProjects(snapshot){const projects=snapshot?.projects||[];if(!projects.length){projectsEl.innerHTML='<div class="muted">Noch keine Projekte im Workspace.</div>';return;}projectsEl.innerHTML=projects.map(project=>{const classification=project.classification||{};const files=(project.files||[]).map(file=>file.original_path).join("<br>");const artifacts=project.artifacts||{};const syncLine=artifacts.sync_map_path?`sync_map: <code>${artifacts.sync_map_path}</code>`:"Noch kein sync_map geschrieben.";const premiereLine=artifacts.premiere_project_path?`Premiere: <code>${artifacts.premiere_project_path}</code>`:"Noch kein Premiere-Projekt geschrieben.";return `<div class="card"><div class="row"><strong>${project.name}</strong><span class="mini">${fmtTime(project.created_at_utc)}</span></div><div class="meta"><div><strong>Master</strong>${classification.master_asset||"nicht erkannt"}</div><div><strong>Kameras</strong>${classification.camera_count??0}</div><div><strong>Output</strong>${outputModeLabel(project.output_mode)}</div><div><strong>Projekt</strong>${artifacts.premiere_project_path?"PRPROJ bereit":"In Arbeit"}</div></div><div class="mini" style="margin-top:8px">${files}</div><div class="mini" style="margin-top:10px">${syncLine}<br>${premiereLine}</div></div>`;}).join("");}
+    function renderProjects(snapshot){const projects=snapshot?.projects||[];if(!projects.length){projectsEl.innerHTML='<div class="muted">Noch keine Projekte im Workspace.</div>';return;}projectsEl.innerHTML=projects.map(project=>{const classification=project.classification||{};const files=(project.files||[]).map(file=>file.original_path).join("<br>");const artifacts=project.artifacts||{};const syncLine=artifacts.sync_map_path?`sync_map: <code>${artifacts.sync_map_path}</code>`:"Noch kein sync_map geschrieben.";const premierePath=artifacts.premiere_xml_path||artifacts.premiere_project_path;const premiereLine=premierePath?`Premiere XML: <code>${premierePath}</code>`:"Noch kein Premiere XML geschrieben.";return `<div class="card"><div class="row"><strong>${project.name}</strong><span class="mini">${fmtTime(project.created_at_utc)}</span></div><div class="meta"><div><strong>Master</strong>${classification.master_asset||"nicht erkannt"}</div><div><strong>Kameras</strong>${classification.camera_count??0}</div><div><strong>Output</strong>${outputModeLabel(project.output_mode)}</div><div><strong>Projekt</strong>${premierePath?"XML bereit":"In Arbeit"}</div></div><div class="mini" style="margin-top:8px">${files}</div><div class="mini" style="margin-top:10px">${syncLine}<br>${premiereLine}</div></div>`;}).join("");}
     function render(snapshot){state.snapshot=snapshot;workspaceLabel.textContent=snapshot.workspace||"";renderMetrics(snapshot);renderUpload();renderJobs(snapshot);renderProjects(snapshot);}
     async function loadState(){try{render(await fetchJson("/api/state"));}catch(error){console.error(error);}}
     function uploadSingleFile(sessionId,file,index,totalCount,totalBytes,counter){return new Promise((resolve,reject)=>{const path=encodeURIComponent(file.webkitRelativePath||file.name);const xhr=new XMLHttpRequest();xhr.open("POST",`/api/uploads/${sessionId}/files?path=${path}`);xhr.upload.onprogress=(event)=>{if(!state.upload)return;state.upload={...state.upload,phase:"upload",fileIndex:index,fileCount:totalCount,sentBytes:counter.baseBytes+event.loaded,totalBytes,message:`${file.name} wird hochgeladen`};renderUpload();};xhr.onload=()=>{if(xhr.status>=200&&xhr.status<300){counter.baseBytes+=file.size;resolve(JSON.parse(xhr.responseText));return;}reject(new Error(xhr.responseText||`Upload fehlgeschlagen: ${file.name}`));};xhr.onerror=()=>reject(new Error(`Upload fehlgeschlagen: ${file.name}`));xhr.send(file);});}
@@ -552,7 +557,7 @@ class UIState:
         for job in payload.get("jobs", []) if isinstance(payload.get("jobs"), list) else []:
             if not isinstance(job, dict) or not isinstance(job.get("id"), str):
                 continue
-            if job.get("status") in {"running", "paused", "pause_requested", "review_required"}:
+            if job.get("status") in {"running", "pause_requested", "queued", "review_required"}:
                 job["status"] = "failed"
                 job["message"] = "Server restart interrupted the previous background job."
                 job["stage_label"] = "unterbrochen"
@@ -785,9 +790,11 @@ class UIState:
             "analysis": (artifacts_dir / "vazer.analysis_map.json").exists(),
             "planning": (artifacts_dir / "vazer.cut_plan.ai.json").exists(),
             "repair": (artifacts_dir / "vazer.cut_plan.repaired.json").exists(),
-            "premiere": any(output_dir.glob("*.prproj")),
+            "premiere_xml": any(output_dir.glob("*.premiere.xml")),
+            "premiere_project": any(output_dir.glob("*.prproj")),
             "render": any(output_dir.glob("*.mp4")),
         }
+        artifact_flags["premiere"] = artifact_flags["premiere_xml"] or artifact_flags["premiere_project"]
 
         if latest_status == "completed" or artifact_flags["render"] or artifact_flags["premiere"]:
             summary = "Abgeschlossen"
@@ -1001,6 +1008,132 @@ class UIState:
                 job_id
                 for job_id, job in self._jobs.items()
                 if job.get("status") in {"queued", "running", "pause_requested", "paused", "review_required"}
+            ]
+            runtimes = [self._runtimes.get(job_id) for job_id in active_job_ids]
+
+        for job_id in active_job_ids:
+            try:
+                self.cancel_job(job_id)
+            except Exception:
+                pass
+
+        executors = []
+        threads = []
+        for runtime in runtimes:
+            if not isinstance(runtime, dict):
+                continue
+            executor = runtime.get("executor")
+            thread = runtime.get("thread")
+            if executor is not None:
+                executors.append(executor)
+            if isinstance(thread, threading.Thread):
+                threads.append(thread)
+            condition = runtime.get("condition")
+            if isinstance(condition, threading.Condition):
+                with condition:
+                    condition.notify_all()
+
+        for executor in executors:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+            except Exception:
+                pass
+
+        terminate_registered_processes()
+
+        for thread in threads:
+            try:
+                thread.join(timeout=2.0)
+            except Exception:
+                pass
+
+    def _load_state(self) -> None:
+        if not self.state_path.exists():
+            return
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return
+
+        for project in payload.get("projects", []) if isinstance(payload.get("projects"), list) else []:
+            if isinstance(project, dict) and isinstance(project.get("id"), str):
+                project["output_mode"] = normalize_output_mode(project.get("output_mode"))
+                if not isinstance(project.get("artifacts_path"), str) or not project.get("artifacts_path"):
+                    project["artifacts_path"] = str(Path(project["root_path"]) / "artifacts")
+                self._projects[project["id"]] = project
+
+        for job in payload.get("jobs", []) if isinstance(payload.get("jobs"), list) else []:
+            if not isinstance(job, dict) or not isinstance(job.get("id"), str):
+                continue
+            if job.get("status") in {"running", "pause_requested", "queued", "review_required"}:
+                job["status"] = "failed"
+                job["message"] = "Server restart interrupted the previous background job."
+                job["stage_label"] = "unterbrochen"
+            self._jobs[job["id"]] = job
+
+    def resume_job(self, job_id: str) -> dict[str, Any]:
+        restart_payload: dict[str, Any] | None = None
+        with self._lock:
+            runtime = self._runtimes.get(job_id)
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise ValueError("Unknown job.")
+            thread = runtime.get("thread") if isinstance(runtime, dict) else None
+            if (
+                isinstance(runtime, dict)
+                and isinstance(thread, threading.Thread)
+                and thread.is_alive()
+            ):
+                runtime["pause_requested"] = False
+                job["status"] = "running"
+                job["stage_label"] = "laeuft"
+                job["message"] = "Job wurde fortgesetzt."
+                job["updated_at_utc"] = _utc_timestamp()
+                self._persist_state()
+                condition = runtime["condition"]
+            else:
+                if str(job.get("status") or "") != "paused":
+                    raise ValueError("Only paused jobs can be resumed after restart.")
+                project = self._projects.get(str(job.get("project_id") or ""))
+                if not isinstance(project, dict):
+                    raise ValueError("Project for paused job was not found.")
+                restart_payload = {
+                    "paths": [str(file_info.get("stored_path") or "") for file_info in project.get("files") or []],
+                    "name": str(project.get("name") or "VAZ Projekt"),
+                    "output_mode": normalize_output_mode(project.get("output_mode")),
+                }
+                job["status"] = "resumed"
+                job["stage_label"] = "fortgesetzt"
+                job["message"] = "Dieser pausierte Lauf wurde als neuer Job wieder aufgenommen."
+                job["updated_at_utc"] = _utc_timestamp()
+                self._persist_state()
+                condition = None
+        if restart_payload is not None:
+            result = self.create_project_from_paths(
+                restart_payload["paths"],
+                name=restart_payload["name"],
+                output_mode=restart_payload["output_mode"],
+                reset_existing=False,
+            )
+            return {
+                "job_id": result["job_id"],
+                "project_id": result["project_id"],
+                "status": "running",
+                "resumed_from_job_id": job_id,
+            }
+        with condition:
+            condition.notify_all()
+        return {"job_id": job_id, "project_id": job.get("project_id"), "status": "running"}
+
+    def shutdown(self, *, preserve_paused: bool = False) -> None:
+        with self._lock:
+            active_job_ids = [
+                job_id
+                for job_id, job in self._jobs.items()
+                if job.get("status") in {"queued", "running", "pause_requested", "review_required"}
+                or (job.get("status") == "paused" and not preserve_paused)
             ]
             runtimes = [self._runtimes.get(job_id) for job_id in active_job_ids]
 
@@ -2324,17 +2457,17 @@ class UIState:
             self._raise_if_canceled(job_id)
             output_root = Path(project.get("default_output_dir") or (project_root / "output"))
             output_root.mkdir(parents=True, exist_ok=True)
-            premiere_project_path = output_root / f"{project['name']}.prproj"
+            premiere_xml_path = output_root / f"{project['name']}.premiere.xml"
             self._update_job(
                 job_id,
-                stage="exporting_premiere",
-                stage_label="Premiere",
-                message="Writing Premiere project file.",
+                stage="exporting_premiere_xml",
+                stage_label="Premiere XML",
+                message="Writing Premiere XML file.",
                 progress_percent=89.0,
             )
-            premiere_summary = export_premiere_project(
+            premiere_summary = export_premiere_xml(
                 repaired_cut_plan,
-                output_project_path=str(premiere_project_path),
+                output_xml_path=str(premiere_xml_path),
                 cut_plan_path=str(repaired_cut_plan_path),
                 project_name=project["name"],
             )
@@ -2345,7 +2478,7 @@ class UIState:
                     "cut_validation_path": str(validation_path),
                     "cut_plan_repaired_path": str(repaired_cut_plan_path),
                     "cut_plan_render_path": str(render_ready_cut_plan_path),
-                    "premiere_project_path": str(premiere_project_path),
+                    "premiere_xml_path": str(premiere_xml_path),
                 },
             )
             self._write_project_manifest(project_id)
@@ -2357,10 +2490,10 @@ class UIState:
                     stage="completed",
                     stage_label="Done",
                     message=(
-                        f"Premiere export complete. "
+                        f"Premiere XML export complete. "
                         f"{final_sync_map['summary']['synced']} synced, "
                         f"{validation_report['summary']['fail']} failed cuts after validation. "
-                        f"Output: {premiere_project_path}"
+                        f"Output: {premiere_xml_path}"
                     ),
                     progress_percent=100.0,
                     artifacts={
@@ -2371,7 +2504,7 @@ class UIState:
                         "cut_plan_ai_path": str(ai_cut_plan_path),
                         "cut_validation_path": str(validation_path),
                         "cut_plan_repaired_path": str(repaired_cut_plan_path),
-                        "premiere_project_path": str(premiere_summary["output"]["path"]),
+                        "premiere_xml_path": str(premiere_summary["output"]["path"]),
                     },
                     details={
                         "file_count": len(files),
@@ -2439,7 +2572,7 @@ class UIState:
                     "cut_plan_ai_path": str(ai_cut_plan_path),
                     "cut_validation_path": str(validation_path),
                     "cut_plan_repaired_path": str(repaired_cut_plan_path),
-                    "premiere_project_path": str(premiere_summary["output"]["path"]),
+                    "premiere_xml_path": str(premiere_summary["output"]["path"]),
                     "render_output_path": str(output_media_path),
                 },
                 details={

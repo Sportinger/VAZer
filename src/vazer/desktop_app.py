@@ -78,14 +78,14 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
     }
     PHASE_INDEX = {phase["id"]: index for index, phase in enumerate(PIPELINE_PHASES)}
     PHASE_PROGRESS_RANGES = {
-        "probe": (0.0, 12.0),
-        "classify": (12.0, 22.0),
-        "roles": (22.0, 30.0),
-        "sync": (30.0, 46.0),
-        "transcript": (46.0, 58.0),
-        "analysis": (58.0, 70.0),
-        "cut": (70.0, 86.0),
-        "render": (86.0, 100.0),
+        "probe": (2.0, 35.0),
+        "classify": (35.0, 40.0),
+        "roles": (40.0, 46.0),
+        "sync": (46.0, 74.0),
+        "transcript": (46.0, 74.0),
+        "analysis": (46.0, 74.0),
+        "cut": (74.0, 89.0),
+        "render": (89.0, 100.0),
     }
 
     class FileRowWidget(QWidget):
@@ -457,6 +457,11 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.abort_button.clicked.connect(self.cancel_active_job)
             self.abort_button.hide()
             footer_layout.addWidget(self.abort_button)
+            self.pause_button = QPushButton("Pause")
+            self.pause_button.setObjectName("secondaryButton")
+            self.pause_button.clicked.connect(self.pause_or_resume_active_job)
+            self.pause_button.hide()
+            footer_layout.addWidget(self.pause_button)
             self.continue_button = QPushButton("Weiter")
             self.continue_button.setObjectName("secondaryButton")
             self.continue_button.clicked.connect(self.confirm_role_review)
@@ -875,8 +880,31 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return
             self.refresh_state()
 
+        def pause_or_resume_active_job(self) -> None:
+            if not self.active_job_id:
+                return
+            active_job = self._find_active_job()
+            if active_job is None:
+                return
+            status = str(active_job.get("status") or "")
+            try:
+                if status in {"queued", "running", "pause_requested"}:
+                    self.app_state.pause_job(self.active_job_id)
+                elif status == "paused":
+                    result = self.app_state.resume_job(self.active_job_id)
+                    new_job_id = str(result.get("job_id") or self.active_job_id)
+                    new_project_id = str(result.get("project_id") or self.active_project_id or "")
+                    self.active_job_id = new_job_id
+                    if new_project_id:
+                        self.active_project_id = new_project_id
+            except Exception as error:
+                QMessageBox.critical(self, "VAZer", str(error))
+                return
+            self.refresh_state()
+
         def refresh_state(self) -> None:
             self.snapshot = self.app_state.snapshot()
+            self._restore_active_context()
             active_project = self._find_active_project()
             active_job = self._find_active_job()
             role_review_payload = self._build_role_review_payload(active_project, active_job)
@@ -890,6 +918,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 self.start_button.show()
                 self.continue_button.hide()
                 self.abort_button.hide()
+                self.pause_button.hide()
                 self.refresh_file_list()
                 self._show_selected_file_preview()
                 return
@@ -917,6 +946,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 self.start_button.show()
                 self.continue_button.hide()
                 self.abort_button.hide()
+                self.pause_button.hide()
                 self._show_selected_file_preview()
                 return
 
@@ -929,14 +959,20 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 f"{stage_label} | {active_job.get('message') or '-'}"
             )
             review_required = active_job.get("status") == "review_required"
+            paused = active_job.get("status") == "paused"
+            pause_capable = active_job.get("status") in {"queued", "running", "pause_requested", "paused"}
             self.start_button.setEnabled(False)
             self.start_button.setVisible(not review_required)
             self.continue_button.setVisible(review_required)
             self.abort_button.setVisible(review_required)
             self.continue_button.setEnabled(review_required)
             self.abort_button.setEnabled(review_required)
+            self.pause_button.setVisible(pause_capable and not review_required)
+            self.pause_button.setEnabled(pause_capable)
+            self.pause_button.setText("Weiter" if paused else "Pause")
             if active_job.get("status") not in {"queued", "running", "pause_requested", "paused", "review_required"}:
                 self.start_button.setEnabled(bool(self.staged_files))
+                self.pause_button.hide()
             if role_review_payload is not None:
                 self._show_role_review(role_review_payload)
             else:
@@ -944,6 +980,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
         def refresh_file_list(self, *, files: list[dict[str, Any]] | None = None, preserve_selection: bool = False) -> None:
             current_path = self._current_list_path() if preserve_selection else None
+            scroll_value = self.file_list.verticalScrollBar().value() if preserve_selection else None
             source_files = files if files is not None else self.staged_files
             self.file_list.blockSignals(True)
             self.file_list.clear()
@@ -961,6 +998,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
             self.file_list.blockSignals(False)
             if self.file_list.count():
                 self.file_list.setCurrentRow(selected_row if selected_row >= 0 else 0)
+                if scroll_value is not None:
+                    self.file_list.verticalScrollBar().setValue(scroll_value)
             else:
                 self.on_file_selection_changed()
 
@@ -1313,6 +1352,32 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                     fills[phase_id] = 100.0
             return fills
 
+        def _restore_active_context(self) -> None:
+            if self.active_job_id and self._find_active_job() is not None:
+                return
+            self.active_job_id = None
+            self.active_project_id = None
+            jobs = list(self.snapshot.get("jobs") or [])
+            for job in jobs:
+                if str(job.get("status") or "") != "paused":
+                    continue
+                project_id = str(job.get("project_id") or "")
+                job_id = str(job.get("id") or "")
+                if project_id and job_id:
+                    self.active_project_id = project_id
+                    self.active_job_id = job_id
+                    return
+            for job in jobs:
+                status = str(job.get("status") or "")
+                if status not in {"queued", "running", "pause_requested", "review_required"}:
+                    continue
+                project_id = str(job.get("project_id") or "")
+                job_id = str(job.get("id") or "")
+                if project_id and job_id:
+                    self.active_project_id = project_id
+                    self.active_job_id = job_id
+                    return
+
         def _phase_from_progress(self, active_job: dict[str, Any]) -> str:
             progress_percent = float(active_job.get("progress_percent") or 0.0)
             for phase_id, (_start_percent, end_percent) in PHASE_PROGRESS_RANGES.items():
@@ -1346,7 +1411,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
 
             artifacts = active_project.get("artifacts") or {}
             artifacts_root = Path(active_project["artifacts_path"])
-            frame_root = artifacts_root / "camera_roles" / "frames"
+            frame_root = artifacts_root / "vazer.camera_roles" / "frames"
             assignments_by_asset: dict[str, dict[str, Any]] = {}
             summary_text = None
             source_text = None
@@ -1443,7 +1508,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 return
             self._shutdown_started = True
             try:
-                self.app_state.shutdown()
+                self.app_state.shutdown(preserve_paused=not force_process_exit)
             except Exception:
                 pass
             if force_process_exit:
