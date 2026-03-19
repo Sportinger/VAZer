@@ -122,6 +122,10 @@ def _coverage_by_asset(sync_map: dict[str, Any], master_duration_seconds: float)
     return coverages
 
 
+def _max_coverage_end_seconds(coverages_by_asset: dict[str, Any]) -> float:
+    return max(float(coverage.overlap_end_seconds) for coverage in coverages_by_asset.values())
+
+
 def _fallback_asset_id(
     visual_packet: dict[str, Any],
     coverages_by_asset: dict[str, Any],
@@ -358,9 +362,20 @@ def _compile_ai_segments(
         and float(proposal.end_seconds) - float(proposal.start_seconds) > EPSILON
     ]
     boundaries = {round(span_start_seconds, 6), round(span_end_seconds, 6)}
+    for coverage in coverages_by_asset.values():
+        if coverage.overlap_end_seconds <= span_start_seconds + EPSILON:
+            continue
+        if coverage.overlap_start_seconds >= span_end_seconds - EPSILON:
+            continue
+        boundaries.add(round(max(span_start_seconds, float(coverage.overlap_start_seconds)), 6))
+        boundaries.add(round(min(span_end_seconds, float(coverage.overlap_end_seconds)), 6))
     for proposal in valid_proposals:
-        boundaries.add(round(max(span_start_seconds, float(proposal.start_seconds)), 6))
-        boundaries.add(round(min(span_end_seconds, float(proposal.end_seconds)), 6))
+        proposal_start_seconds = max(span_start_seconds, float(proposal.start_seconds))
+        proposal_end_seconds = min(span_end_seconds, float(proposal.end_seconds))
+        if proposal_end_seconds - proposal_start_seconds <= EPSILON:
+            continue
+        boundaries.add(round(proposal_start_seconds, 6))
+        boundaries.add(round(proposal_end_seconds, 6))
     ordered_boundaries = sorted(boundaries)
 
     windows_by_asset = _analysis_windows_by_asset(analysis_map)
@@ -462,6 +477,13 @@ def build_ai_draft_cut_plan(
     master_duration_seconds = _require_duration(master_payload, "Master audio", master_path)
     coverages_by_asset = _coverage_by_asset(sync_map, master_duration_seconds)
     span_start_seconds, span_end_seconds = _span_from_visual_packet(visual_packet, ai_options)
+    max_coverage_end_seconds = _max_coverage_end_seconds(coverages_by_asset)
+    span_end_seconds = min(span_end_seconds, max_coverage_end_seconds)
+    if span_end_seconds - span_start_seconds <= EPSILON:
+        raise ValueError(
+            "No synced camera covers requested AI planning span "
+            f"{span_start_seconds:.3f}s..{ai_options.master_end_seconds if ai_options.master_end_seconds is not None else span_end_seconds:.3f}s."
+        )
     fallback_asset_id = _fallback_asset_id(visual_packet, coverages_by_asset)
     input_content = _build_input_content(
         sync_map=sync_map,

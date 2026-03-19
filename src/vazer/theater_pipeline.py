@@ -7,7 +7,7 @@ from typing import Any
 
 from . import __version__
 from .ai_draft import AIDraftOptions, build_ai_draft_cut_plan
-from .cut_plan import EPSILON, _merge_video_segments, _require_duration
+from .cut_plan import EPSILON, _coverage_window, _merge_video_segments, _require_duration
 from .visual_packet import VisualPacketOptions, build_visual_packet
 
 
@@ -244,7 +244,21 @@ def build_chunked_ai_draft_bundle(
     master_payload = sync_map["master"]
     master_path = master_payload["path"]
     master_duration_seconds = _require_duration(master_payload, "Master audio", master_path)
-    spans = _chunk_spans(master_duration_seconds, pipeline_options.chunk_seconds)
+    coverage_windows = [
+        coverage
+        for entry in sync_map.get("entries", [])
+        if isinstance(entry, dict) and entry.get("status") == "synced"
+        if (coverage := _coverage_window(entry, master_duration_seconds)) is not None
+    ]
+    if not coverage_windows:
+        raise ValueError("sync_map does not contain any synced coverage.")
+    planning_duration_seconds = min(
+        master_duration_seconds,
+        max(float(coverage.overlap_end_seconds) for coverage in coverage_windows),
+    )
+    if planning_duration_seconds <= EPSILON:
+        raise ValueError("No synced camera covers a usable project span.")
+    spans = _chunk_spans(planning_duration_seconds, pipeline_options.chunk_seconds)
     total_chunks = max(1, len(spans))
 
     chunk_plans: list[dict[str, Any]] = []
