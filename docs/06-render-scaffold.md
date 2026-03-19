@@ -22,22 +22,30 @@ Das ist absichtlich konservativ:
 
 ```json
 {
-  "schema_version": "vazer.render_scaffold.v1",
+  "schema_version": "vazer.render_scaffold.v2",
   "generated_at_utc": "2026-03-17T16:22:00Z",
   "tool": {},
   "source_cut_plan": {},
   "inputs": [],
   "output": {},
   "artifacts": {},
+  "segments": [],
+  "audio": {},
+  "concat": {},
+  "mux": {},
   "ffmpeg": {}
 }
 ```
 
 ## Erzeugte Dateien
 
-- `sample-render.filtergraph.txt`
+- `sample-render.audio.filtergraph.txt`
+- `sample-render.concat.txt`
 - `sample-render.ffmpeg.txt`
 - `sample-render.render.json`
+- `sample-render.segments\segment_0001.mp4`
+- `sample-render.video.concat.mp4`
+- `sample-render.audio.m4a`
 
 ## Aktueller CLI-Command
 
@@ -48,21 +56,24 @@ python -m vazer render scaffold --cut-plan .\artifacts\cut_plan.json --output-me
 
 ## Aktueller ffmpeg-Ansatz
 
+VAZer rendert jetzt segmentiert statt ueber einen einzigen grossen `filter_complex`-Graphen.
+
 Pro Video-Segment:
 
-- `trim` auf die berechnete Source-Zeit
+- echtes Input-Seeking via `-ss` und `-t` direkt am Quelldatei-Input
 - `setpts` zur Korrektur kleiner Sync-Drift
 - `fps`, `scale`/`scale_cuda`, `pad`/`pad_cuda` zur Vereinheitlichung
+- Ausgabe als temp Segment-Datei
 
-Pro Audio-Segment:
+Fuer Audio:
 
-- `atrim` aus dem Master-Audio
-- `asetpts`
+- eigener Audio-Only-Graph mit `atrim` + `concat` aus der Masterspur
 
 Danach:
 
-- Video-Segmente via `concat`
-- Audio-Segmente via `concat`
+- Video-Segmente per Concat-Demuxer mit `-c copy` zusammenfuehren
+- Audio separat rendern
+- finales MP4 per schnellem Mux aus concat-Video + Audio
 
 ## CUDA-Renderpfad
 
@@ -80,13 +91,13 @@ Im Render-Manifest steht der aktive Pfad unter:
 - `output.render_pipeline.video_path`
 - `output.render_pipeline.input_args`
 
-Der generierte Command nutzt die dateibasierte ffmpeg-Variante `-/filter_complex`, damit der Filtergraph nicht als ein einziger Kommandozeilenblock im Shell-Command landen muss.
+Der temp Segment-Render nutzt jetzt keinen riesigen Video-Filtergraphen mehr. Die dateibasierte ffmpeg-Variante bleibt nur fuer den Audio-Only-Graphen relevant.
 
 ## Beispiel aus dem Sample
 
 ```text
-[1:v]trim=...,setpts=...,fps=25.000000,scale_cuda=3840:2160:...:format=nv12,pad_cuda=...[v1]
-[v1]concat=n=1:v=1:a=0[vout]
+ffmpeg -ss 153.697123 -t 2.000000 -hwaccel cuda -hwaccel_output_format cuda -extra_hw_frames 8 -i "...Close.MXF" -an -vf setpts=...,fps=25.000000,scale_cuda=1920:1080:...:format=nv12,pad_cuda=... -c:v h264_nvenc ...
+ffmpeg -f concat -safe 0 -i sample-render.concat.txt -c copy sample-render.video.concat.mp4
 [0:a]atrim=...,asetpts=PTS-STARTPTS[a1]
 [a1]concat=n=1:v=0:a=1[aout]
 ```
@@ -97,7 +108,8 @@ Der generierte Command nutzt die dateibasierte ffmpeg-Variante `-/filter_complex
 - noch keine Transitionen
 - noch kein Multi-Track-Audio-Mix
 - noch keine Validierung gegen exotische Codec-/Filter-Kombinationen
-- tiefe `trim`-Starts sind weiterhin teuer, weil lange Quellen bis zur ersten benoetigten Stelle dekodiert werden muessen
+- viele sehr kurze Segmentdateien erzeugen weiterhin Overhead
+- der grosse Geschwindigkeitshebel liegt jetzt im Input-Seeking; weitere Optimierung waere spaeter Block-Rendering statt Einzelsegment-Dateien
 
 ## Validierungsstand
 
@@ -105,6 +117,6 @@ Der Scaffold wurde gegen den Ordner `D:\VAZ_Chaos\Medien` mit drei MXF-Kameras p
 
 Wichtig:
 
-- die JSON- und Filtergraph-Erzeugung funktioniert fuer beide Plaene
-- ein voller ffmpeg-Smoke-Test auf dem signal-aware Plan ist bei langen 4K-H.264-Quellen aktuell teuer
-- fuer Entwicklung sollten deshalb Proxys oder kuerzere Preview-Render bevorzugt werden
+- der neue segmentierte Runner wurde auf einem echten 2-Segment-4s-Slice erfolgreich durchgetestet
+- ein echter 2-Minuten-FHD-Plan mit 3 Segmenten lief ueber den neuen Pfad in rund `15.9s`
+- fuer sehr lange Shows bleibt die Gesamtzeit weiter segmentabhaengig, ist aber deutlich weniger decode-blockiert als beim alten Monolithen
