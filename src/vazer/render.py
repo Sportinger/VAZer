@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from . import __version__
+from .fftools import probe_media
 from .process_manager import popen_managed, unregister_process
 
 
@@ -235,6 +236,58 @@ def _command_line_text(command: list[str]) -> str:
     return subprocess.list2cmdline(command)
 
 
+def _validate_video_segments(video_segments: list[dict[str, Any]]) -> None:
+    duration_cache: dict[str, float] = {}
+    invalid_segments: list[str] = []
+    for segment in video_segments:
+        asset_path = str(segment.get("asset_path") or "")
+        if not asset_path:
+            invalid_segments.append(f"{segment.get('id') or '?'} missing asset_path")
+            continue
+        duration_seconds = duration_cache.get(asset_path)
+        if duration_seconds is None:
+            media_info = probe_media(asset_path)
+            duration_seconds = float(media_info.duration_seconds or 0.0)
+            duration_cache[asset_path] = duration_seconds
+        try:
+            source_start_seconds = float(segment.get("source_start_seconds") or 0.0)
+            source_end_seconds = float(segment.get("source_end_seconds") or 0.0)
+        except (TypeError, ValueError):
+            invalid_segments.append(f"{segment.get('id') or '?'} has non-numeric source bounds")
+            continue
+        if duration_seconds <= 0:
+            invalid_segments.append(f"{segment.get('id') or '?'} {Path(asset_path).name} has unknown duration")
+            continue
+        if source_start_seconds < -0.01:
+            invalid_segments.append(
+                f"{segment.get('id') or '?'} {Path(asset_path).name} starts before 0s ({source_start_seconds:.3f}s)"
+            )
+        if source_end_seconds - source_start_seconds <= 0.01:
+            invalid_segments.append(
+                f"{segment.get('id') or '?'} {Path(asset_path).name} has non-positive span "
+                f"({source_start_seconds:.3f}s..{source_end_seconds:.3f}s)"
+            )
+        if source_start_seconds >= duration_seconds - 0.01:
+            invalid_segments.append(
+                f"{segment.get('id') or '?'} {Path(asset_path).name} starts after clip end "
+                f"({source_start_seconds:.3f}s >= {duration_seconds:.3f}s)"
+            )
+        if source_end_seconds > duration_seconds + 0.25:
+            invalid_segments.append(
+                f"{segment.get('id') or '?'} {Path(asset_path).name} ends after clip end "
+                f"({source_end_seconds:.3f}s > {duration_seconds:.3f}s)"
+            )
+    if invalid_segments:
+        preview = "; ".join(invalid_segments[:6])
+        extra = "" if len(invalid_segments) <= 6 else f"; plus {len(invalid_segments) - 6} more"
+        raise ValueError(
+            "Cut plan contains source ranges outside the available media. "
+            + preview
+            + extra
+            + ". Rebuild the cut plan instead of reusing the stale artifact."
+        )
+
+
 def _stage_command_text(manifest: dict[str, Any]) -> str:
     lines: list[str] = []
     for segment in manifest.get("segments", []):
@@ -338,6 +391,7 @@ def build_render_scaffold(
         raise ValueError("cut_plan does not contain any video segments.")
     if not audio_segments:
         raise ValueError("cut_plan does not contain any audio segments.")
+    _validate_video_segments(video_segments)
 
     master_path = cut_plan["master_audio"]["path"]
     output_path = Path(output_media_path)
@@ -566,6 +620,7 @@ def run_render(
     segments = manifest.get("segments") or []
     if not isinstance(segments, list) or not segments:
         raise ValueError("Render manifest does not contain any video segments.")
+    _validate_video_segments(segments)
 
     output_duration_seconds = float(manifest["output"]["duration_seconds"])
     total_video_duration = sum(max(0.0, float(segment.get("duration_seconds") or 0.0)) for segment in segments) or output_duration_seconds

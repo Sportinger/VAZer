@@ -295,6 +295,36 @@ def _load_reusable_cut_plan(
     if not referenced_paths or not referenced_paths.issubset(camera_path_set):
         return None
 
+    duration_cache: dict[str, float] = {}
+    for segment in video_segments:
+        if not isinstance(segment, dict):
+            return None
+        asset_path = segment.get("asset_path")
+        if not isinstance(asset_path, str) or not asset_path:
+            return None
+        duration_seconds = duration_cache.get(asset_path)
+        if duration_seconds is None:
+            media_info = probe_media(asset_path)
+            duration_seconds = float(media_info.duration_seconds or 0.0)
+            if duration_seconds <= 0:
+                return None
+            duration_cache[asset_path] = duration_seconds
+
+        try:
+            source_start_seconds = float(segment.get("source_start_seconds") or 0.0)
+            source_end_seconds = float(segment.get("source_end_seconds") or 0.0)
+        except (TypeError, ValueError):
+            return None
+
+        if source_start_seconds < -0.01:
+            return None
+        if source_end_seconds - source_start_seconds <= 0.01:
+            return None
+        if source_start_seconds >= duration_seconds - 0.01:
+            return None
+        if source_end_seconds > duration_seconds + 0.25:
+            return None
+
     if source_sync_map_path is not None:
         source_sync_map = payload.get("source_sync_map") or {}
         if not isinstance(source_sync_map, dict) or not _same_media_path(source_sync_map.get("path"), source_sync_map_path):
@@ -2501,31 +2531,37 @@ class UIState:
                 source_analysis_map_path=str(analysis_map_path),
                 source_transcript_path=str(transcript_path),
             )
-            reusable_validation_report = _load_reusable_cut_validation(
-                validation_path,
-                source_cut_plan_path=str(ai_cut_plan_path),
-                source_sync_map_path=str(sync_map_path),
-                source_analysis_map_path=str(analysis_map_path),
-                source_transcript_path=str(transcript_path),
-            )
-            reusable_repaired_cut_plan = _load_reusable_cut_plan(
-                repaired_cut_plan_path,
-                str(master_path),
-                camera_path_list,
-                planning_stage="repaired",
-                source_sync_map_path=str(sync_map_path),
-                source_analysis_map_path=str(analysis_map_path),
-                source_transcript_path=str(transcript_path),
-            )
-            reusable_render_ready_cut_plan = _load_reusable_cut_plan(
-                render_ready_cut_plan_path,
-                str(master_path),
-                camera_path_list,
-                planning_stage="repaired",
-                source_sync_map_path=str(sync_map_path),
-                source_analysis_map_path=str(analysis_map_path),
-                source_transcript_path=str(transcript_path),
-            )
+            reusable_validation_report = None
+            reusable_repaired_cut_plan = None
+            reusable_render_ready_cut_plan = None
+            if reusable_ai_cut_plan is not None:
+                reusable_validation_report = _load_reusable_cut_validation(
+                    validation_path,
+                    source_cut_plan_path=str(ai_cut_plan_path),
+                    source_sync_map_path=str(sync_map_path),
+                    source_analysis_map_path=str(analysis_map_path),
+                    source_transcript_path=str(transcript_path),
+                )
+            if reusable_ai_cut_plan is not None and reusable_validation_report is not None:
+                reusable_repaired_cut_plan = _load_reusable_cut_plan(
+                    repaired_cut_plan_path,
+                    str(master_path),
+                    camera_path_list,
+                    planning_stage="repaired",
+                    source_sync_map_path=str(sync_map_path),
+                    source_analysis_map_path=str(analysis_map_path),
+                    source_transcript_path=str(transcript_path),
+                )
+            if reusable_repaired_cut_plan is not None:
+                reusable_render_ready_cut_plan = _load_reusable_cut_plan(
+                    render_ready_cut_plan_path,
+                    str(master_path),
+                    camera_path_list,
+                    planning_stage="repaired",
+                    source_sync_map_path=str(sync_map_path),
+                    source_analysis_map_path=str(analysis_map_path),
+                    source_transcript_path=str(transcript_path),
+                )
 
             self._wait_if_paused(job_id)
             self._raise_if_canceled(job_id)
