@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shutil
 import threading
@@ -24,6 +25,31 @@ from .sync_map import write_sync_map
 from .theater_pipeline import TheaterPipelineOptions, build_chunked_ai_draft_bundle
 from .transcribe import TranscriptionOptions, build_master_transcript, write_transcript_artifact
 from .visual_packet import write_visual_packet
+
+IGNORED_IMPORT_FILENAMES = {
+    ".ds_store",
+    "thumbs.db",
+    "desktop.ini",
+}
+
+
+def should_ignore_import_file(path: Path) -> bool:
+    name = path.name.strip()
+    lowered = name.lower()
+    return lowered.startswith(".") or lowered in IGNORED_IMPORT_FILENAMES
+
+
+def resolve_default_output_dir(paths: list[Path]) -> str | None:
+    if not paths:
+        return None
+
+    parents = [str(path.parent) for path in paths]
+    try:
+        common_parent = Path(os.path.commonpath(parents))
+    except ValueError:
+        return None
+
+    return str(common_parent) if common_parent.exists() else None
 
 INDEX_HTML = """<!doctype html>
 <html lang="de">
@@ -332,7 +358,9 @@ class UIState:
         if not session_dir.exists():
             raise ValueError("Unknown upload session.")
 
-        file_paths = sorted(path for path in session_dir.rglob("*") if path.is_file())
+        file_paths = sorted(
+            path for path in session_dir.rglob("*") if path.is_file() and not should_ignore_import_file(path)
+        )
         if not file_paths:
             raise ValueError("The upload session does not contain any files.")
 
@@ -361,11 +389,16 @@ class UIState:
             project_name=project_name,
             project_root=project_root,
             inputs_path=str(inputs_root),
+            default_output_dir=None,
             files=files,
         )
 
     def create_project_from_paths(self, paths: list[str], name: str | None = None) -> dict[str, Any]:
-        resolved_paths = [Path(path).expanduser().resolve() for path in paths]
+        resolved_paths = [
+            Path(path).expanduser().resolve()
+            for path in paths
+            if not should_ignore_import_file(Path(path).expanduser())
+        ]
         if not resolved_paths:
             raise ValueError("At least one file path is required.")
         missing = [path for path in resolved_paths if not path.is_file()]
@@ -392,6 +425,7 @@ class UIState:
             project_name=project_name,
             project_root=project_root,
             inputs_path=None,
+            default_output_dir=resolve_default_output_dir(resolved_paths),
             files=files,
         )
 
@@ -402,10 +436,12 @@ class UIState:
         project_name: str,
         project_root: Path,
         inputs_path: str | None,
+        default_output_dir: str | None,
         files: list[dict[str, Any]],
     ) -> dict[str, Any]:
         artifacts_root = project_root / "artifacts"
         artifacts_root.mkdir(parents=True, exist_ok=True)
+        fallback_output_dir = project_root / "output"
         project = {
             "schema_version": "vazer.ui_project.v1",
             "id": project_id,
@@ -415,6 +451,7 @@ class UIState:
             "root_path": str(project_root),
             "inputs_path": inputs_path,
             "artifacts_path": str(artifacts_root),
+            "default_output_dir": default_output_dir or str(fallback_output_dir),
             "files": files,
             "classification": {},
             "artifacts": {},
@@ -1362,7 +1399,7 @@ class UIState:
                 message="Rendering final FHD cut.",
                 progress_percent=90.0,
             )
-            output_root = project_root / "output"
+            output_root = Path(project.get("default_output_dir") or (project_root / "output"))
             output_root.mkdir(parents=True, exist_ok=True)
             output_media_path = output_root / f"{project['name']}.fhd.mp4"
             render_manifest = build_render_scaffold(
@@ -1400,7 +1437,8 @@ class UIState:
                 message=(
                     f"Render complete. "
                     f"{final_sync_map['summary']['synced']} synced, "
-                    f"{validation_report['summary']['fail']} failed cuts after validation."
+                    f"{validation_report['summary']['fail']} failed cuts after validation. "
+                    f"Output: {output_media_path}"
                 ),
                 progress_percent=100.0,
                 artifacts={

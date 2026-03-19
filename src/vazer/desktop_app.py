@@ -39,7 +39,7 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
         raise ValueError("PySide6 is not installed. Install project dependencies first.") from error
 
     from .fftools import probe_media
-    from .ui_server import UIState
+    from .ui_server import UIState, should_ignore_import_file
 
     PIPELINE_PHASES = [
         {"id": "probe", "symbol": "ING", "label": "Import", "detail": "Probe"},
@@ -1071,6 +1071,8 @@ def launch_desktop_app(*, workspace: str, auto_quit_ms: int | None = None) -> in
                 else:
                     candidates = []
                 for candidate in candidates:
+                    if should_ignore_import_file(candidate):
+                        continue
                     resolved = str(candidate.resolve())
                     if resolved not in seen:
                         seen.add(resolved)

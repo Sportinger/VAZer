@@ -41,6 +41,9 @@ Das heisst:
 - kein Browser-Upload
 - keine Kopie ins Workspace nur fuer den Import
 - Projektartefakte liegen trotzdem im lokalen VAZer-Workspace
+- der finale Render landet bei Desktop-Referenzprojekten standardmaessig im gemeinsamen Quellordner
+- wenn die Quelldateien aus verschiedenen Ordnern kommen, faellt VAZer auf den Projekt-Workspace als Output-Ziel zurueck
+- offensichtliche Sidecar-/Hidden-Dateien wie `._*.MXF` werden beim Import ignoriert
 
 Das ist fuer lange 4K-Theatermitschnitte deutlich sinnvoller als ein Browser-Upload.
 
